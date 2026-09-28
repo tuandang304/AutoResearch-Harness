@@ -8,6 +8,7 @@ import re
 
 import yaml
 from ai_scientist.cli_llm import PROVIDER_PRESETS
+from autoresearch.llm_strategy import apply_strategy
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -19,6 +20,9 @@ def validate_config(config):
         if not isinstance(config.get(section), dict):
             raise ValueError(f"Configuration needs a {section} mapping")
     agent, execution = config["agent"], config["exec"]
+    effort = config.get("codex_reasoning_effort")
+    if effort is not None and effort not in ("none", "minimal", "low", "medium", "high", "xhigh", "max"):
+        raise ValueError("Invalid codex_reasoning_effort")
     max_stages = agent.get("max_stages", 4)
     if isinstance(max_stages, bool) or not isinstance(max_stages, int) or not 1 <= max_stages <= 4:
         raise ValueError("agent.max_stages must be an integer between 1 and 4")
@@ -86,9 +90,9 @@ def validate_config(config):
         or not 0 <= probability <= 1
     ):
         raise ValueError("agent.search.debug_prob must be between 0 and 1")
-    for role in ("code", "feedback", "vlm_feedback", "summary", "select_node"):
+    for role in ("code", "feedback", "vlm_feedback", "summary", "select_node", "orchestrator"):
         setting = agent.get(role)
-        if role in ("summary", "select_node") and setting is None:
+        if role in ("summary", "select_node", "orchestrator") and setting is None:
             continue
         if (
             not isinstance(setting, dict)
@@ -104,7 +108,7 @@ def validate_config(config):
     return config
 
 
-def load_run_config(path, provider=None, backend=None, workers=None):
+def load_run_config(path, provider=None, backend=None, workers=None, orchestrator=None, worker=None):
     with Path(path).open() as source:
         config = yaml.safe_load(source)
     if not isinstance(config, dict):
@@ -121,7 +125,7 @@ def load_run_config(path, provider=None, backend=None, workers=None):
         config.setdefault("exec", {})["backend"] = backend
     if workers is not None:
         config.setdefault("agent", {})["num_workers"] = workers
-    return validate_config(config)
+    return validate_config(apply_strategy(config, orchestrator, worker))
 
 
 def load_idea(path, index):

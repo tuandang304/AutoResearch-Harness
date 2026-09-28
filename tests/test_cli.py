@@ -17,6 +17,17 @@ from ai_scientist.utils.token_tracker import (
 
 
 class CLITests(unittest.TestCase):
+    def test_codex_low_effort_is_explicit(self):
+        events = ['{"type":"item.completed","item":{"type":"agent_message","text":"ok"}}', '{"type":"turn.completed","usage":{}}']
+        with tempfile.TemporaryDirectory() as cwd, patch.dict(
+            os.environ, {"AUTORESEARCH_CODEX_REASONING_EFFORT": "low"}
+        ), patch.object(cli_llm, "_run_streaming", return_value=events) as run:
+            for model in ("gpt-6-astra", "gpt-6-sol"):
+                cli_llm._run_codex(model, "", "ok", [], cwd)
+                cmd = run.call_args.args[0]
+                self.assertEqual(cmd[cmd.index("-m") + 1], model)
+                self.assertEqual(cmd[cmd.index("-c") + 1], 'model_reasoning_effort="low"')
+
     def test_api_retries_are_bounded_and_preserve_error(self):
         from ai_scientist.treesearch.backend.utils import backoff_create
         from unittest.mock import Mock

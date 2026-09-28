@@ -14,6 +14,21 @@ from launch_scientist_bfts import main, find_pdf_path_for_review
 
 
 class PipelineTests(unittest.TestCase):
+    def test_code_only_model_reply_does_not_waste_format_retries(self):
+        from ai_scientist.treesearch.parallel_agent import MinimalAgent
+        from types import SimpleNamespace
+        cfg = SimpleNamespace(agent=SimpleNamespace(code=SimpleNamespace(model="codex/gpt-6-sol", temp=0.2)))
+        agent = MinimalAgent(task_desc="smoke", cfg=cfg)
+        with patch("ai_scientist.treesearch.parallel_agent.query", return_value="```python\nprint('ok')\n```") as call:
+            plan, code = agent.plan_and_code_query({})
+            self.assertTrue(plan)
+            self.assertIn("print", code)
+            call.assert_called_once()
+        with patch("ai_scientist.treesearch.parallel_agent.query", return_value="No executable code available.") as call:
+            with self.assertRaisesRegex(ValueError, "executable Python"):
+                agent.plan_and_code_query({}, retries=2)
+            self.assertEqual(call.call_count, 2)
+
     def test_worker_timeout_fails_instead_of_silently_retrying(self):
         from ai_scientist.treesearch.parallel_agent import ParallelAgent
         from omegaconf import OmegaConf
@@ -74,6 +89,17 @@ class PipelineTests(unittest.TestCase):
             journal = Journal()
             journal.append(Node.from_dict(result, journal))
             self.assertEqual(len(journal.good_nodes), 1)
+            seed_node = Node(code="seed", plan="repeat", is_seed_node=True)
+            seed_node.is_buggy = seed_node.is_buggy_plots = False
+            seed_node.metric = journal.nodes[0].metric
+            journal.append(seed_node)
+            from types import SimpleNamespace
+            with patch("ai_scientist.treesearch.journal.query") as query:
+                selected = journal.get_best_node(
+                    cfg=SimpleNamespace(agent={"smoke_test": True})
+                )
+                self.assertEqual(selected.id, result["id"])
+                query.assert_not_called()
             saved = root / "workspaces" / "logs" / "0-run" / "experiment_results"
             self.assertTrue(list(saved.rglob("experiment_data.npy")))
             np.save(working / "experiment_data.npy", {"loss": np.array([float("nan")])})

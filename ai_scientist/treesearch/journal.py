@@ -429,6 +429,14 @@ class Journal:
         else:
             nodes = self.nodes
 
+        if cfg is not None and cfg.agent.get("smoke_test", False):
+            if not nodes:
+                return None
+            # Smoke nodes measure successful execution, not scientific merit.
+            # Prefer the first valid implementation over additional seed nodes.
+            candidates = [node for node in nodes if not node.is_seed_node] or nodes
+            return max(candidates, key=lambda node: node.metric)
+
         if use_val_metric_only:
             return max(nodes, key=lambda n: n.metric)
 

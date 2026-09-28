@@ -18,6 +18,36 @@ a finding is novel or correct.
 
 ## Start here
 
+### Orchestrator–worker model routing
+
+The default and UAV smoke configurations use **GPT-6-Astra** for orchestration
+and **GPT-6-Sol** for workers, with `codex_reasoning_effort: low` for both.
+The launcher passes this to every Codex subprocess as
+`-c 'model_reasoning_effort="low"'`, including manuscript and review calls.
+This setting is scoped to the run; it does not modify your personal Codex config.
+
+Use `--orchestrator-model codex/gpt-6-astra --worker-model PROVIDER/MODEL`
+with your normal run command. Replace `PROVIDER/MODEL` with an authenticated,
+lower-cost model available to your account; workers need image support for plot
+review. `--dry-run` shows the resolved assignments without making model calls.
+
+The orchestrator makes stage decisions, proposes tuning and ablation experiments,
+selects promising results, and writes and reviews the final paper. Workers generate
+and debug code, extract metrics, create and inspect plots, summarize results, and
+assist with citations and writing. The manager delegates through the existing
+experiment task prompts and receives execution results and structured feedback.
+This reuses the existing worker processes without adding a planning call to every
+routine operation. Colab training configuration is independent of model routing.
+
+For YAML configuration, set `agent.orchestrator: {model: codex/gpt-6-astra, temp: 0.2}`
+and assign worker models to `agent.code`, `agent.feedback`, `agent.vlm_feedback`,
+`agent.summary`, and `report`. Node selection follows the orchestrator. CLI role
+flags such as `--model_review` still override paper defaults. Existing configs keep
+their previous behavior. Setting only `--worker-model` retains the original code
+model as orchestrator. Worker failures use existing bounded retry/debug paths;
+there is no automatic escalation to the expensive model. Actual savings depend
+on provider billing and retries; no cost reduction has yet been benchmarked.
+
 For a small GPU pipeline check, see the [low-light UAV T4 smoke test](docs/uav-lowlight-smoke.md).
 
 Linux and Python 3.11 are the local development baseline.

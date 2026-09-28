@@ -5,6 +5,7 @@ from enum import Enum, auto
 from pathlib import Path
 import logging
 from .parallel_agent import ParallelAgent
+from autoresearch.llm_strategy import decision_model
 from .journal import Journal, Node
 import copy
 import re
@@ -365,8 +366,8 @@ Your research idea:\n\n
                 system_message=eval_prompt,
                 user_message=None,
                 func_spec=stage_completion_eval_spec,
-                model=self.cfg.agent.feedback.model,
-                temperature=self.cfg.agent.feedback.temp,
+                model=decision_model(self.cfg.agent).model,
+                temperature=decision_model(self.cfg.agent).temp,
             )
             if evaluation["is_complete"]:
                 logger.info(
@@ -466,8 +467,8 @@ Your research idea:\n\n
                     system_message=eval_prompt,
                     user_message=None,
                     func_spec=stage_completion_eval_spec,
-                    model=self.cfg.agent.feedback.model,
-                    temperature=self.cfg.agent.feedback.temp,
+                    model=decision_model(self.cfg.agent).model,
+                    temperature=decision_model(self.cfg.agent).temp,
                 )
 
                 if evaluation["is_complete"]:
@@ -608,8 +609,8 @@ Your research idea:\n\n
                 system_message=prompt,
                 user_message=None,
                 func_spec=substage_goal_spec,
-                model=self.cfg.agent.feedback.model,
-                temperature=self.cfg.agent.feedback.temp,
+                model=decision_model(self.cfg.agent).model,
+                temperature=decision_model(self.cfg.agent).temp,
             )
 
             # Format the response into a structured goal string
@@ -1015,8 +1016,8 @@ Your research idea:\n\n
                 system_message=prompt,
                 user_message=None,
                 func_spec=stage_config_spec,
-                model=self.cfg.agent.feedback.model,
-                temperature=self.cfg.agent.feedback.temp,
+                model=decision_model(self.cfg.agent).model,
+                temperature=decision_model(self.cfg.agent).temp,
             )
             return response
 
@@ -1190,8 +1191,8 @@ Your research idea:\n\n
                 system_message=eval_prompt,
                 user_message=None,
                 func_spec=stage_progress_eval_spec,
-                model=self.cfg.agent.feedback.model,
-                temperature=self.cfg.agent.feedback.temp,
+                model=decision_model(self.cfg.agent).model,
+                temperature=decision_model(self.cfg.agent).temp,
             )
 
             # Log the evaluation for transparency

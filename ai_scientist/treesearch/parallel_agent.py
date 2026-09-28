@@ -1,4 +1,5 @@
 from concurrent.futures import ProcessPoolExecutor
+from autoresearch.llm_strategy import decision_model
 from typing import List, Optional, Set, Any, Callable, cast, Dict, Tuple
 import random
 import subprocess
@@ -803,16 +804,16 @@ class MinimalAgent:
             code = extract_code(completion_text)
             nl_text = extract_text_up_to_code(completion_text)
 
-            if code and nl_text:
+            if code:
                 # merge all code blocks into a single string
-                return nl_text, code
+                return nl_text or "Generated implementation.", code
 
             print("Plan + code extraction failed, retrying...")
             prompt["Parsing Feedback"] = (
                 "The code extraction failed. Make sure to use the format ```python ... ``` for the code blocks."
             )
         print("Final plan + code extraction attempt failed, giving up...")
-        return "", completion_text  # type: ignore
+        raise ValueError("Model did not return valid executable Python after format retries")
 
     def parse_exec_result(
         self, node: Node, exec_result: ExecutionResult, workspace: str
@@ -826,6 +827,9 @@ class MinimalAgent:
                 "You are an experienced AI researcher. "
                 "You have written code for your research experiment and now need to evaluate the output of the code execution. "
                 "Analyze the execution output, determine if there were any bugs, and provide a summary of the findings. "
+                "Set is_bug only for execution, implementation, invalid measurements, or explicit task-constraint failures. "
+                "Poor precision/recall, zero recall, many false positives, or a weak undertrained model alone are not bugs. "
+                "Respect the requested training budget; do not demand longer training to accept a bounded smoke test. "
             ),
             "Research idea": self.task_desc,
             "Implementation": wrap_code(node.code),
@@ -2002,8 +2006,8 @@ class ParallelAgent:
             response = query(
                 system_message=hyperparam_tuning_prompt,
                 user_message=None,
-                model=self.cfg.agent.code.model,
-                temperature=self.cfg.agent.code.temp,
+                model=decision_model(self.cfg.agent, "code").model,
+                temperature=decision_model(self.cfg.agent, "code").temp,
             )
 
             # Parse the response
@@ -2065,8 +2069,8 @@ class ParallelAgent:
             response = query(
                 system_message=ablation_prompt,
                 user_message=None,
-                model=self.cfg.agent.code.model,
-                temperature=self.cfg.agent.code.temp,
+                model=decision_model(self.cfg.agent, "code").model,
+                temperature=decision_model(self.cfg.agent, "code").temp,
             )
 
             # Parse the response
@@ -2239,7 +2243,11 @@ class ParallelAgent:
             else:
                 node_data_list.append(None)  # None means new draft
 
-        if self.cfg.agent.get("summary", None) is not None:
+        if self.cfg.agent.get("smoke_test", False):
+            memory_summary = "\n".join(
+                f"{node.id}: {node.analysis}" for node in self.journal.nodes
+            )
+        elif self.cfg.agent.get("summary", None) is not None:
             memory_summary = self.journal.generate_summary(
                 include_code=False, 
                 **{

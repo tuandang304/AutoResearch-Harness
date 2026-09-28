@@ -72,6 +72,7 @@ class AgentConfig:
 
     summary: Optional[StageConfig] = None
     select_node: Optional[StageConfig] = None
+    orchestrator: Optional[StageConfig] = None
     max_stages: int = 4
     worker_timeout: int = 7200
     smoke_test: bool = False
@@ -115,6 +116,7 @@ class Config(Hashable):
     agent: AgentConfig
     experiment: ExperimentConfig
     debug: DebugConfig
+    codex_reasoning_effort: Optional[str] = None
 
 
 def _get_next_logindex(dir: Path) -> int:

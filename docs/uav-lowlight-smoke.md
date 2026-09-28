@@ -74,3 +74,46 @@ enforced by the harness. Partial workspaces survive failure and interruption,
 including `experiment_code.py` and `execution_result.json` once training returns.
 Each worker attempt has its own directory. A previous live run verified T4
 training but exposed a whole-node timeout; it was not an end-to-end pass.
+
+## Verified run
+
+On 2026-09-28, `2026-09-28_20-43-14_420838_uav_lowlight_t4_smoke_attempt_0`
+completed stage one and its seed repeat on a Tesla T4. Both runs used 64 clean
+and 64 low-light training images, two epochs, batch size 8, and fixed dataset
+splits; model seeds were 42 and 0. Remote execution took 9.05 and 8.60 seconds.
+Each returned a 405,813-byte data artifact, loss curves, prediction montage,
+experiment code, and execution metadata. Training losses were finite and the
+final run status was `completed`. The full run took about seven minutes,
+including code generation, a format retry and journal saving. Subsequent
+changes remove LLM ranking and summary calls from smoke journal saving; those
+changes passed regression tests but were not separately timed on Colab.
+
+This verifies the bounded smoke profile. Full research stages and manuscript
+generation need their own integration run. Standard analysis was separately
+verified as described below. The smoke success metric records execution/artifact validation, not
+detection accuracy. Actual detector precision/recall remain in the data artifact.
+
+## Validate standard analysis without retraining
+
+The standard analysis path was separately verified on the saved smoke artifact
+in `experiments/uav_lowlight_analysis_check_2`: execution review, generated metric
+parser, structured metric extraction, generated plots, GPT-6-Sol image review
+and dataset identification all passed. All 12 extracted metrics matched the
+saved values within the parser's printed precision, and three valid PNG plots
+were generated. Later research stages and manuscript generation remain untested.
+
+To repeat this check, supply an experiment result directory containing
+`experiment_data.npy`, `experiment_code.py`, and `execution_result.json`:
+
+```bash
+.venv/bin/python -m autoresearch.validate_analysis \
+  experiments/<run>/logs/0-run/experiment_results/<experiment> \
+  --config configs/uav_lowlight_t4_smoke.yaml \
+  --output experiments/<new-analysis-check>
+```
+
+The command copies the saved data into a new directory and runs analysis locally.
+It uses the configured model and requires CLI quota, but no new GPU training.
+Each step retains generated code and results; `analysis_status.json` records
+completion or the failed step. Execution review now treats low detection scores
+as a result to explain, while actual execution or measurement errors remain bugs.

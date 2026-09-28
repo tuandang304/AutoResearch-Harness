@@ -449,6 +449,11 @@ def _run_codex(model, system, prompt, images, workdir):
     ]
     if model:
         cmd += ["-m", model]
+    effort = os.environ.get("AUTORESEARCH_CODEX_REASONING_EFFORT")
+    if effort:
+        if effort not in ("none", "minimal", "low", "medium", "high", "xhigh", "max"):
+            raise ValueError("Invalid AUTORESEARCH_CODEX_REASONING_EFFORT")
+        cmd += ["-c", f'model_reasoning_effort="{effort}"']
     cmd.append("-")  # read the prompt from stdin
     lines = _run_streaming(
         cmd,

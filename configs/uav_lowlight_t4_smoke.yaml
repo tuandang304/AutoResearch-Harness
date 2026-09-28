@@ -1,5 +1,6 @@
 # Explicit model: do not pass --provider codex (it selects the CLI default).
 data_dir: data
+codex_reasoning_effort: low
 preprocess_data: false
 goal: null
 eval: null
@@ -20,6 +21,7 @@ report: {model: codex/gpt-6-sol, temp: 0.2}
 experiment: {num_syn_datasets: 1}
 debug: {stage4: false}
 agent:
+  orchestrator: {model: codex/gpt-6-astra, temp: 0.2}
   type: parallel
   num_workers: 1
   max_stages: 1
@@ -39,5 +41,5 @@ agent:
   feedback: {model: codex/gpt-6-sol, temp: 0.2, max_tokens: 4096}
   vlm_feedback: {model: codex/gpt-6-sol, temp: 0.2, max_tokens: 4096}
   summary: {model: codex/gpt-6-sol, temp: 0.2}
-  select_node: {model: codex/gpt-6-sol, temp: 0.2}
+  select_node: {model: codex/gpt-6-astra, temp: 0.2}
   search: {max_debug_depth: 1, debug_prob: 1.0, num_drafts: 1}

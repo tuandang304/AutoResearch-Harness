@@ -46,6 +46,8 @@ def parse_arguments(argv=None):
     parser.add_argument("--config", type=Path, default=ROOT / "bfts_config.yaml")
     parser.add_argument("--output-dir", type=Path, default=ROOT / "experiments")
     parser.add_argument("--num-workers", type=int, help="Override agent.num_workers")
+    parser.add_argument("--orchestrator-model", help="Model for research decisions, final writing and review")
+    parser.add_argument("--worker-model", help="Model for implementation, debugging, metrics, plots and summaries")
     parser.add_argument(
         "--dry-run",
         action="store_true",
@@ -469,17 +471,21 @@ def main(argv=None):
     previous = None
     previous_cwd = Path.cwd()
     previous_usage_log = os.environ.get("AUTORESEARCH_USAGE_LOG")
+    previous_effort = os.environ.get("AUTORESEARCH_CODEX_REASONING_EFFORT")
     try:
         args.load_ideas = str(Path(args.load_ideas).resolve())
         args.config = args.config.resolve()
         args.output_dir = args.output_dir.resolve()
         config = load_run_config(
-            args.config, args.provider, args.exec_backend, args.num_workers
+            args.config, args.provider, args.exec_backend, args.num_workers,
+            args.orchestrator_model, args.worker_model,
         )
         idea = load_idea(args.load_ideas, args.idea_idx)
         for name in MODEL_FLAGS:
             if getattr(args, name) is None:
                 role = "code" if name == "model_writeup" else "feedback"
+                if config["agent"].get("orchestrator") and name in ("model_writeup", "model_review"):
+                    role = "orchestrator"
                 setattr(args, name, config["agent"][role]["model"])
         if args.load_code and not Path(args.load_ideas).with_suffix(".py").is_file():
             raise ValueError("--load_code needs a Python file next to the ideas JSON")
@@ -505,6 +511,8 @@ def main(argv=None):
             )
             return 0
         os.environ["AI_SCIENTIST_ROOT"] = str(ROOT)
+        if config.get("codex_reasoning_effort"):
+            os.environ["AUTORESEARCH_CODEX_REASONING_EFFORT"] = config["codex_reasoning_effort"]
         if config["exec"].get("backend") == "colab":
             from ai_scientist.treesearch.remote_interpreter import load_remote_config
 
@@ -532,6 +540,10 @@ def main(argv=None):
             if previous is not None:
                 cleanup_children(previous)
             os.chdir(previous_cwd)
+            if previous_effort is None:
+                os.environ.pop("AUTORESEARCH_CODEX_REASONING_EFFORT", None)
+            else:
+                os.environ["AUTORESEARCH_CODEX_REASONING_EFFORT"] = previous_effort
             if previous_usage_log is None:
                 os.environ.pop("AUTORESEARCH_USAGE_LOG", None)
             else:

@@ -113,7 +113,11 @@ def perform_experiments_bfts(config_path: str):
                         json.dump(summary, f, indent=2)
 
 
-            if cfg.agent.get("summary", None) is not None:
+            if cfg.agent.smoke_test:
+                current_findings = "\n".join(
+                    f"{node.id}: {node.analysis}" for node in journal.nodes
+                )
+            elif cfg.agent.get("summary", None) is not None:
                 current_findings = journal.generate_summary(
                     include_code=False, 
                     **{
