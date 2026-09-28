@@ -1270,6 +1270,9 @@ class ParallelAgent:
         seed_nodes = []
         futures = []
         for seed in range(self.cfg.agent.multi_seed_eval.num_seeds):
+            # ProcessPoolExecutor serializes submissions asynchronously: each seed
+            # must own its input instead of sharing a dictionary modified below.
+            node_data = node.to_dict()
             gpu_id = None
             if self.gpu_manager is not None:
                 try:

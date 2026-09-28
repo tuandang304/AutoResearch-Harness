@@ -295,6 +295,7 @@ class Node(DataClassJsonMixin):
     @classmethod
     def from_dict(cls, data: Dict, journal: Optional[Journal] = None) -> "Node":
         """Create a Node from a dictionary, optionally linking to journal for relationships"""
+        data = copy.deepcopy(data)
         # Remove relationship IDs from constructor data
         parent_id = data.pop("parent_id", None)
         children = data.pop("children", [])

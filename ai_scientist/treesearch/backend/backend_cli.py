@@ -55,7 +55,9 @@ def query(
         if isinstance(last["content"], str):
             last["content"] += instruction
         else:
-            last["content"] = list(last["content"]) + [{"type": "text", "text": instruction}]
+            last["content"] = list(last["content"]) + [
+                {"type": "text", "text": instruction}
+            ]
 
     t0 = time.time()
     in_tokens = out_tokens = 0
@@ -65,7 +67,13 @@ def query(
         if feedback:
             attempt_messages = messages + [{"role": "user", "content": feedback}]
         text, usage = complete(model, attempt_messages)
-        token_tracker.add_tokens(model, usage.get("prompt", 0), usage.get("completion", 0), usage.get("reasoning", 0), usage.get("cached", 0))
+        token_tracker.add_tokens(
+            model,
+            usage.get("prompt", 0),
+            usage.get("completion", 0),
+            usage.get("reasoning", 0),
+            usage.get("cached", 0),
+        )
         in_tokens += usage.get("prompt", 0)
         out_tokens += usage.get("completion", 0)
 
@@ -84,6 +92,8 @@ def query(
                 "Reply again with ONLY the corrected JSON object in a ```json block."
             )
     else:
-        raise ValueError(f"{model} did not return valid JSON for `{name}`: {text[:500]}")
+        raise ValueError(
+            f"{model} did not return valid JSON for `{name}`: {text[:500]}"
+        )
 
     return output, time.time() - t0, in_tokens, out_tokens, {"model": model}

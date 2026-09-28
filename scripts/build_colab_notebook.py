@@ -15,7 +15,11 @@ OUT = ROOT / "notebooks" / "colab_gpu_executor.ipynb"
 
 
 def md(src):
-    return {"cell_type": "markdown", "metadata": {}, "source": src.strip("\n").splitlines(True)}
+    return {
+        "cell_type": "markdown",
+        "metadata": {},
+        "source": src.strip("\n").splitlines(True),
+    }
 
 
 def code(src):
@@ -75,7 +79,7 @@ matplotlib and transformers.
 `agent.num_workers` in `bfts_config.yaml` equal to it. 1–2 suits a T4 (16 GB);
 an L4 or A100 can take 3–4.
 """),
-    code(r'''
+    code(r"""
 import json, os, re, secrets, subprocess, time, urllib.request
 
 MAX_CONCURRENT = 1
@@ -130,14 +134,14 @@ with urllib.request.urlopen(req, timeout=15) as response:
     assert json.load(response)["protocol_version"] == 2
 print("Paste this into remote_executor.json on your machine:\n")
 print(json.dumps({"url": url, "token": TOKEN}, indent=2))
-'''),
+"""),
     md("""
 ## 5. Monitor the executor
 
 Leave this cell running. It prints the queue and GPU status every minute.
 Interrupting it does **not** stop the executor.
 """),
-    code(r'''
+    code(r"""
 import json, time, urllib.request
 
 def health():
@@ -156,14 +160,14 @@ while True:
         print(open("/content/server.log").read()[-2000:])
         break
     time.sleep(60)
-'''),
+"""),
     md("""
 ## 6. Stop the executor and tunnel
 
 Interrupt the monitoring cell, then run this cell manually. It stops the
 executor, its experiments and the tunnel. It does not delete completed artifacts.
 """),
-    code(r'''
+    code(r"""
 for name in ("server", "tunnel"):
     process = globals().get(name)
     if process is not None and process.poll() is None:
@@ -174,7 +178,7 @@ for name in ("server", "tunnel"):
             process.kill()
             process.wait()
 print("Executor and tunnel stopped.")
-'''),
+"""),
 ]
 
 nb = {

@@ -37,25 +37,61 @@ def validate_config(config):
     depth = agent["search"].get("max_debug_depth")
     if isinstance(depth, bool) or not isinstance(depth, int) or depth < 0:
         raise ValueError("agent.search.max_debug_depth must be a nonnegative integer")
-    for key, default in (("timeout", 3600), ("remote_max_file_mb", 100), ("remote_wait_minutes", 60)):
+    for key, default in (
+        ("timeout", 3600),
+        ("remote_max_file_mb", 100),
+        ("remote_wait_minutes", 60),
+    ):
         value = execution.get(key, default)
-        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0 or (value == 0 and key != "remote_wait_minutes"):
-            raise ValueError(f"exec.{key} must be finite and {'nonnegative' if key == 'remote_wait_minutes' else 'positive'}")
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(value)
+            or value < 0
+            or (value == 0 and key != "remote_wait_minutes")
+        ):
+            raise ValueError(
+                f"exec.{key} must be finite and {'nonnegative' if key == 'remote_wait_minutes' else 'positive'}"
+            )
     if execution.get("backend", "local") not in ("local", "colab"):
         raise ValueError("exec.backend must be local or colab")
+    if execution.get("backend") == "colab" and (
+        execution.get("timeout", 3600) > 86400
+        or execution.get("remote_max_file_mb", 100) > 512
+    ):
+        raise ValueError(
+            "Colab timeout is limited to 86400 seconds and remote_max_file_mb to 512"
+        )
+    if config.get("exp_name") != "run":
+        raise ValueError(
+            "exp_name must be run for the paper pipeline; use --output-dir to choose a location"
+        )
     filename = execution.get("agent_file_name", "runfile.py")
     if not isinstance(filename, str) or not re.fullmatch(r"[\w.-]+\.py", filename):
-        raise ValueError("exec.agent_file_name must be a Python filename without directories")
+        raise ValueError(
+            "exec.agent_file_name must be a Python filename without directories"
+        )
     probability = agent["search"].get("debug_prob")
-    if isinstance(probability, bool) or not isinstance(probability, (int, float)) or not 0 <= probability <= 1:
+    if (
+        isinstance(probability, bool)
+        or not isinstance(probability, (int, float))
+        or not 0 <= probability <= 1
+    ):
         raise ValueError("agent.search.debug_prob must be between 0 and 1")
     for role in ("code", "feedback", "vlm_feedback", "summary", "select_node"):
         setting = agent.get(role)
         if role in ("summary", "select_node") and setting is None:
             continue
-        if not isinstance(setting, dict) or not isinstance(setting.get("model"), str) or not setting["model"].strip():
+        if (
+            not isinstance(setting, dict)
+            or not isinstance(setting.get("model"), str)
+            or not setting["model"].strip()
+        ):
             raise ValueError(f"agent.{role}.model must be a nonempty string")
-    if not isinstance(config["report"].get("model"), str) or not config["report"]["model"].strip():
+    if (
+        not isinstance(config["report"].get("model"), str)
+        or not config["report"]["model"].strip()
+    ):
         raise ValueError("report.model must be a nonempty string")
     return config
 
@@ -88,7 +124,11 @@ def load_idea(path, index):
     if not 0 <= index < len(ideas):
         raise ValueError(f"idea_idx must be between 0 and {len(ideas) - 1}")
     idea = ideas[index]
-    if not isinstance(idea, dict) or not isinstance(idea.get("Name"), str) or not idea["Name"].strip():
+    if (
+        not isinstance(idea, dict)
+        or not isinstance(idea.get("Name"), str)
+        or not idea["Name"].strip()
+    ):
         raise ValueError("Selected idea must be an object with a nonempty Name")
     return idea
 

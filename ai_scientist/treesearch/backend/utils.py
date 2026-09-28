@@ -8,26 +8,27 @@ FunctionCallType = dict
 OutputType = str | FunctionCallType
 
 
-import backoff
+import time
 import logging
 from typing import Callable
 
 logger = logging.getLogger("ai-scientist")
 
 
-@backoff.on_predicate(
-    wait_gen=backoff.expo,
-    max_value=60,
-    factor=1.5,
-)
 def backoff_create(
     create_fn: Callable, retry_exceptions: list[Exception], *args, **kwargs
 ):
-    try:
-        return create_fn(*args, **kwargs)
-    except retry_exceptions as e:
-        logger.info(f"Backoff exception: {e}")
-        return False
+    for attempt in range(6):
+        try:
+            return create_fn(*args, **kwargs)
+        except tuple(retry_exceptions) as exc:
+            if attempt == 5:
+                raise
+            delay = min(60, 1.5 * 2**attempt)
+            logger.warning(
+                "Model request failed (%s); retrying in %ss", type(exc).__name__, delay
+            )
+            time.sleep(delay)
 
 
 def opt_messages_to_list(

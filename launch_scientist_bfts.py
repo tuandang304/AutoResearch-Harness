@@ -20,26 +20,37 @@ def print_time():
 
 def save_token_tracker(idea_dir):
     from ai_scientist.utils.token_tracker import token_tracker
+
     write_json(Path(idea_dir) / "token_tracker.json", token_tracker.get_summary())
-    write_json(Path(idea_dir) / "token_tracker_interactions.json", token_tracker.get_interactions())
+    write_json(
+        Path(idea_dir) / "token_tracker_interactions.json",
+        token_tracker.get_interactions(),
+    )
 
 
-# Defaults for the per-stage model flags when --provider is not given.
-DEFAULT_MODELS = {
-    "model_agg_plots": "o3-mini-2025-01-31",
-    "model_writeup": "o1-preview-2024-09-12",
-    "model_citation": "gpt-4o-2024-11-20",
-    "model_writeup_small": "gpt-4o-2024-05-13",
-    "model_review": "gpt-4o-2024-11-20",
-}
+# Unspecified roles inherit the resolved tree-search config.
+MODEL_FLAGS = (
+    "model_agg_plots",
+    "model_writeup",
+    "model_citation",
+    "model_writeup_small",
+    "model_review",
+)
 
 
 def parse_arguments(argv=None):
-    parser = argparse.ArgumentParser(description="AutoResearch-Harness: experiments, papers and review")
+    parser = argparse.ArgumentParser(
+        prog="autoresearch",
+        description="AutoResearch-Harness: experiments, papers and review",
+    )
     parser.add_argument("--config", type=Path, default=ROOT / "bfts_config.yaml")
     parser.add_argument("--output-dir", type=Path, default=ROOT / "experiments")
     parser.add_argument("--num-workers", type=int, help="Override agent.num_workers")
-    parser.add_argument("--dry-run", action="store_true", help="Validate inputs and print the resolved run without model calls or experiments")
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Validate inputs and print the resolved run without model calls or experiments",
+    )
     parser.add_argument(
         "--provider",
         type=str,
@@ -145,7 +156,9 @@ def parse_arguments(argv=None):
     )
     args = parser.parse_args(argv)
     if args.writeup_retries < 1 or args.num_cite_rounds < 0 or args.attempt_id < 0:
-        parser.error("writeup-retries must be positive; citation rounds and attempt_id must be nonnegative")
+        parser.error(
+            "writeup-retries must be positive; citation rounds and attempt_id must be nonnegative"
+        )
     return args
 
 
@@ -167,7 +180,12 @@ def find_pdf_path_for_review(idea_dir):
 
     def rank(path):
         match = re.search(r"reflection[_.]?(\d+)", path.stem)
-        return ("final" in path.stem.lower(), int(match[1]) if match else -1, path.stat().st_mtime_ns, path.name)
+        return (
+            "final" in path.stem.lower(),
+            int(match[1]) if match else -1,
+            path.stat().st_mtime_ns,
+            path.name,
+        )
 
     return str(max(files, key=rank))
 
@@ -189,9 +207,6 @@ def redirect_stdout_stderr_to_file(log_file_path):
 
 def run_pipeline(args, idea, config):
     from ai_scientist.llm import create_client
-    from ai_scientist.cli_llm import PROVIDER_PRESETS
-    
-    from contextlib import contextmanager
     from ai_scientist.treesearch.perform_experiments_bfts_with_agentmanager import (
         perform_experiments_bfts,
     )
@@ -209,7 +224,8 @@ def run_pipeline(args, idea, config):
     from ai_scientist.perform_llm_review import perform_review, load_paper
     from ai_scientist.perform_vlm_review import perform_imgs_cap_ref_review
     from ai_scientist.utils.token_tracker import token_tracker
-    
+
+    token_tracker.reset()
     os.environ["AI_SCIENTIST_ROOT"] = os.path.dirname(os.path.abspath(__file__))
     print(f"Set AI_SCIENTIST_ROOT to {os.environ['AI_SCIENTIST_ROOT']}")
 
@@ -221,10 +237,12 @@ def run_pipeline(args, idea, config):
     args.idea_idx = 0
 
     date = datetime.now().strftime("%Y-%m-%d_%H-%M-%S_%f")
-    idea_dir = str(args.output_dir / f"{date}_{idea_slug(idea['Name'])}_attempt_{args.attempt_id}")
-    args.run_dir = Path(idea_dir)
+    idea_dir = str(
+        args.output_dir / f"{date}_{idea_slug(idea['Name'])}_attempt_{args.attempt_id}"
+    )
     print(f"Results will be saved in {idea_dir}")
     os.makedirs(idea_dir, exist_ok=False)
+    args.run_dir = Path(idea_dir)
     os.environ["AUTORESEARCH_USAGE_LOG"] = str(Path(idea_dir) / "usage.jsonl")
 
     # Convert idea json to markdown file
@@ -290,16 +308,26 @@ def run_pipeline(args, idea, config):
         )
 
     import yaml
+
     with open(idea_config_path) as source:
         run_config = yaml.safe_load(source)
-    config.update({key: run_config[key] for key in ("desc_file", "workspace_dir", "data_dir", "log_dir")})
+    config.update(
+        {
+            key: run_config[key]
+            for key in ("desc_file", "workspace_dir", "data_dir", "log_dir")
+        }
+    )
     with open(idea_config_path, "w") as dest:
         yaml.safe_dump(config, dest)
     update_run_status(args, "running", stage="experiments")
     perform_experiments_bfts(idea_config_path)
     experiment_results_dir = osp.join(idea_dir, "logs/0-run/experiment_results")
-    if not os.path.isdir(experiment_results_dir) or not os.listdir(experiment_results_dir):
-        raise RuntimeError("No experiment results were produced; inspect the tree-search logs")
+    if not os.path.isdir(experiment_results_dir) or not os.listdir(
+        experiment_results_dir
+    ):
+        raise RuntimeError(
+            "No experiment results were produced; inspect the tree-search logs"
+        )
     if os.path.exists(experiment_results_dir):
         shutil.copytree(
             experiment_results_dir,
@@ -341,12 +369,15 @@ def run_pipeline(args, idea, config):
                     big_model=args.model_writeup,
                     page_limit=4,
                     citations_text=citations_text,
+                    num_cite_rounds=args.num_cite_rounds,
                 )
             if writeup_success:
                 break
 
         if not writeup_success:
-            raise RuntimeError("Writeup did not complete successfully after all retries")
+            raise RuntimeError(
+                "Writeup did not complete successfully after all retries"
+            )
 
     save_token_tracker(idea_dir)
 
@@ -378,7 +409,9 @@ def write_json(path, value):
     path = Path(path)
     temporary = None
     try:
-        with tempfile.NamedTemporaryFile(mode="w", dir=path.parent, delete=False) as stream:
+        with tempfile.NamedTemporaryFile(
+            mode="w", dir=path.parent, delete=False
+        ) as stream:
             temporary = Path(stream.name)
             json.dump(value, stream, indent=2, default=str)
             stream.flush()
@@ -392,7 +425,11 @@ def write_json(path, value):
 def update_run_status(args, status, **details):
     if getattr(args, "run_dir", None) is not None:
         path = args.run_dir / "run_status.json"
-        state = json.loads(path.read_text()) if path.exists() else {"started_at": datetime.now(timezone.utc).isoformat()}
+        state = (
+            json.loads(path.read_text())
+            if path.exists()
+            else {"started_at": datetime.now(timezone.utc).isoformat()}
+        )
         state.update(status=status, **details)
         if status != "running":
             state["finished_at"] = datetime.now(timezone.utc).isoformat()
@@ -402,7 +439,12 @@ def update_run_status(args, status, **details):
 def cleanup_children(previous):
     """Stop only descendants created by this run; never scan other processes."""
     import psutil
-    children = [child for child in psutil.Process().children(recursive=True) if child not in previous]
+
+    children = [
+        child
+        for child in psutil.Process().children(recursive=True)
+        if child not in previous
+    ]
     for child in children:
         try:
             child.terminate()
@@ -425,25 +467,44 @@ def main(argv=None):
         args.load_ideas = str(Path(args.load_ideas).resolve())
         args.config = args.config.resolve()
         args.output_dir = args.output_dir.resolve()
-        config = load_run_config(args.config, args.provider, args.exec_backend, args.num_workers)
+        config = load_run_config(
+            args.config, args.provider, args.exec_backend, args.num_workers
+        )
         idea = load_idea(args.load_ideas, args.idea_idx)
-        for name in DEFAULT_MODELS:
+        for name in MODEL_FLAGS:
             if getattr(args, name) is None:
                 role = "code" if name == "model_writeup" else "feedback"
                 setattr(args, name, config["agent"][role]["model"])
         if args.load_code and not Path(args.load_ideas).with_suffix(".py").is_file():
             raise ValueError("--load_code needs a Python file next to the ideas JSON")
         if args.add_dataset_ref and not (ROOT / "hf_dataset_reference.py").is_file():
-            raise ValueError("--add_dataset_ref needs hf_dataset_reference.py in the repository")
+            raise ValueError(
+                "--add_dataset_ref needs hf_dataset_reference.py in the repository"
+            )
         if args.dry_run:
-            print(json.dumps({"idea": idea["Name"], "output_dir": str(args.output_dir), "config": config,
-                              "models": {k: v for k, v in vars(args).items() if k.startswith("model_")}}, indent=2))
+            print(
+                json.dumps(
+                    {
+                        "idea": idea["Name"],
+                        "output_dir": str(args.output_dir),
+                        "config": config,
+                        "models": {
+                            k: v
+                            for k, v in vars(args).items()
+                            if k.startswith("model_")
+                        },
+                    },
+                    indent=2,
+                )
+            )
             return 0
         os.environ["AI_SCIENTIST_ROOT"] = str(ROOT)
         if config["exec"].get("backend") == "colab":
             from ai_scientist.treesearch.remote_interpreter import load_remote_config
+
             load_remote_config()
         import psutil
+
         previous = set(psutil.Process().children(recursive=True))
         os.chdir(ROOT)  # legacy templates use repository-relative paths
         run_pipeline(args, idea, config)

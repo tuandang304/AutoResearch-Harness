@@ -43,9 +43,17 @@ import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 if __package__:
-    from .workspace import MAX_ARCHIVE_BYTES, extract_workspace, pack_workspace as pack_files
+    from .workspace import (
+        MAX_ARCHIVE_BYTES,
+        extract_workspace,
+        pack_workspace as pack_files,
+    )
 else:  # standalone files embedded in the Colab notebook
-    from workspace import MAX_ARCHIVE_BYTES, extract_workspace, pack_workspace as pack_files
+    from workspace import (
+        MAX_ARCHIVE_BYTES,
+        extract_workspace,
+        pack_workspace as pack_files,
+    )
 
 JOBS_ROOT = os.environ.get("AISCI_JOBS_ROOT", "/content/aisci_jobs")
 MAX_CONCURRENT = int(os.environ.get("AISCI_MAX_CONCURRENT", "2"))
@@ -61,20 +69,45 @@ def validate_spec(spec):
         raise ValueError("code must be a string")
     for key, default, maximum in (("timeout", 3600, 86400), ("max_file_mb", 100, 512)):
         value = spec.setdefault(key, default)
-        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or not 0 < value <= maximum:
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(value)
+            or not 0 < value <= maximum
+        ):
             raise ValueError(f"{key} must be positive and at most {maximum}")
     name = spec.setdefault("agent_file_name", "runfile.py")
-    if not isinstance(name, str) or not name or name in (".", "..", EXC_FILE) or "/" in name or "\\" in name or "\x00" in name:
+    if (
+        not isinstance(name, str)
+        or not name
+        or name in (".", "..", EXC_FILE)
+        or "/" in name
+        or "\\" in name
+        or "\x00" in name
+    ):
         raise ValueError("agent_file_name must be a plain filename")
     env = spec.setdefault("env_vars", {})
-    if not isinstance(env, dict) or any(not isinstance(k, str) or not k or "=" in k or "\x00" in k or not isinstance(v, str) or "\x00" in v for k, v in env.items()):
+    if not isinstance(env, dict) or any(
+        not isinstance(k, str)
+        or not k
+        or "=" in k
+        or "\x00" in k
+        or not isinstance(v, str)
+        or "\x00" in v
+        for k, v in env.items()
+    ):
         raise ValueError("env_vars must contain string environment names and values")
-    if "job_id" in spec and (not isinstance(spec["job_id"], str) or len(spec["job_id"]) != 32 or any(c not in "0123456789abcdef" for c in spec["job_id"])):
+    if "job_id" in spec and (
+        not isinstance(spec["job_id"], str)
+        or len(spec["job_id"]) != 32
+        or any(c not in "0123456789abcdef" for c in spec["job_id"])
+    ):
         raise ValueError("job_id must be a 32-character lowercase hexadecimal ID")
     if not isinstance(spec.get("workspace_tgz_b64", ""), str):
         raise ValueError("workspace_tgz_b64 must be a base64 string")
 
-RUNNER_SOURCE = r'''
+
+RUNNER_SOURCE = r"""
 import json, os, sys, traceback
 fname = sys.argv[1]
 exc_file = sys.argv[2]
@@ -84,6 +117,8 @@ with open(fname) as f:
 try:
     exec(compile(code, fname, "exec"), {"__name__": "__main__", "__file__": fname})
 except BaseException as e:
+    if isinstance(e, SystemExit) and e.code in (None, 0):
+        raise
     tb_lines = traceback.format_exception(type(e), e, e.__traceback__)
     tb_str = "".join(l for l in tb_lines if "aisci_runner" not in l and "importlib" not in l)
     tb_str = tb_str.replace(os.path.join(os.getcwd(), fname), fname)
@@ -101,7 +136,7 @@ except BaseException as e:
     with open(exc_file, "w") as f:
         json.dump({"exc_type": name, "exc_info": exc_info, "exc_stack": stack}, f)
     sys.exit(1)
-'''
+"""
 
 
 def naturaldelta(seconds: float) -> str:
@@ -121,8 +156,14 @@ def naturaldelta(seconds: float) -> str:
 def gpu_info() -> str:
     try:
         return subprocess.run(
-            ["nvidia-smi", "--query-gpu=name,memory.used,memory.total", "--format=csv,noheader"],
-            capture_output=True, text=True, timeout=10,
+            [
+                "nvidia-smi",
+                "--query-gpu=name,memory.used,memory.total",
+                "--format=csv,noheader",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=10,
         ).stdout.strip()
     except Exception:
         return "no GPU"
@@ -152,7 +193,11 @@ def _truncate(text: str) -> str:
     if len(text) <= MAX_OUTPUT_CHARS:
         return text
     half = MAX_OUTPUT_CHARS // 2
-    return text[:half] + "\n\n[... output truncated by remote executor ...]\n\n" + text[-half:]
+    return (
+        text[:half]
+        + "\n\n[... output truncated by remote executor ...]\n\n"
+        + text[-half:]
+    )
 
 
 def run_job(job: Job) -> None:
@@ -179,9 +224,14 @@ def run_job(job: Job) -> None:
             output.close()
             return
         job.proc = subprocess.Popen(
-        [sys.executable, "-u", runner, agent_file, EXC_FILE],
-        cwd=job.ws, env=env, stdout=output, stderr=subprocess.STDOUT,
-        text=True, errors="replace", start_new_session=True,
+            [sys.executable, "-u", runner, agent_file, EXC_FILE],
+            cwd=job.ws,
+            env=env,
+            stdout=output,
+            stderr=subprocess.STDOUT,
+            text=True,
+            errors="replace",
+            start_new_session=True,
         )
     timed_out = False
     try:
@@ -208,7 +258,11 @@ def run_job(job: Job) -> None:
         raw = output.read(MAX_OUTPUT_CHARS)
         if size > MAX_OUTPUT_CHARS:
             output.seek(-MAX_OUTPUT_CHARS // 2, os.SEEK_END)
-            raw = raw[:MAX_OUTPUT_CHARS // 2] + b"\n[... output truncated ...]\n" + output.read()
+            raw = (
+                raw[: MAX_OUTPUT_CHARS // 2]
+                + b"\n[... output truncated ...]\n"
+                + output.read()
+            )
         output.close()
         out = raw.decode("utf-8", errors="replace")
     exec_time = time.monotonic() - start
@@ -219,7 +273,11 @@ def run_job(job: Job) -> None:
         with open(exc_path) as f:
             exc = json.load(f)
         os.remove(exc_path)
-        exc_type, exc_info, exc_stack = exc["exc_type"], exc["exc_info"], exc["exc_stack"]
+        exc_type, exc_info, exc_stack = (
+            exc["exc_type"],
+            exc["exc_info"],
+            exc["exc_stack"],
+        )
     elif job.proc.returncode not in (0, None):
         # killed by a signal or crashed without a Python exception (e.g. OOM kill)
         exc_type = "RuntimeError"
@@ -279,7 +337,11 @@ def janitor_loop() -> None:
         time.sleep(600)
         now = time.time()
         with JOBS_LOCK:
-            stale = [j for j in JOBS.values() if j.status == "done" and now - (j.finished or now) > JOB_TTL_SECONDS]
+            stale = [
+                j
+                for j in JOBS.values()
+                if j.status == "done" and now - (j.finished or now) > JOB_TTL_SECONDS
+            ]
             for j in stale:
                 JOBS.pop(j.id, None)
         for j in stale:
@@ -308,7 +370,10 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def _authorized(self) -> bool:
-        if hmac.compare_digest(self.headers.get("Authorization", "").encode(), f"Bearer {self.server.token}".encode()):
+        if hmac.compare_digest(
+            self.headers.get("Authorization", "").encode(),
+            f"Bearer {self.server.token}".encode(),
+        ):
             return True
         self._send(401, {"error": "unauthorized"})
         return False
@@ -327,19 +392,29 @@ class Handler(BaseHTTPRequestHandler):
         if parts == ["health"]:
             with JOBS_LOCK:
                 states = [j.status for j in JOBS.values()]
-            self._send(200, {
-                "ok": True,
-                "protocol_version": 2,
-                "gpu": gpu_info(),
-                "python": sys.version.split()[0],
-                "max_concurrent": MAX_CONCURRENT,
-                "running": states.count("running"),
-                "queued": states.count("queued"),
-            })
+            self._send(
+                200,
+                {
+                    "ok": True,
+                    "protocol_version": 2,
+                    "gpu": gpu_info(),
+                    "python": sys.version.split()[0],
+                    "max_concurrent": MAX_CONCURRENT,
+                    "running": states.count("running"),
+                    "queued": states.count("queued"),
+                },
+            )
         elif len(parts) == 2 and parts[0] == "jobs":
             job = self._job(parts[1])
             if job:
-                self._send(200, {"status": job.status, "result": job.result, "created": job.created})
+                self._send(
+                    200,
+                    {
+                        "status": job.status,
+                        "result": job.result,
+                        "created": job.created,
+                    },
+                )
         elif len(parts) == 3 and parts[0] == "jobs" and parts[2] == "workspace":
             job = self._job(parts[1])
             if job is None:
@@ -350,7 +425,9 @@ class Handler(BaseHTTPRequestHandler):
                 data, skipped = pack_workspace(job.ws, job.spec.get("max_file_mb", 100))
             except (ValueError, OSError) as exc:
                 return self._send(422, {"error": str(exc)})
-            self._send(200, data, "application/gzip", {"X-Skipped-Files": json.dumps(skipped)})
+            self._send(
+                200, data, "application/gzip", {"X-Skipped-Files": json.dumps(skipped)}
+            )
         else:
             self._send(404, {"error": "not found"})
 
@@ -363,7 +440,9 @@ class Handler(BaseHTTPRequestHandler):
         try:
             length = int(self.headers.get("Content-Length", 0))
             if not 0 < length <= MAX_REQUEST_BYTES:
-                return self._send(413, {"error": "Request body is empty or exceeds size limit"})
+                return self._send(
+                    413, {"error": "Request body is empty or exceeds size limit"}
+                )
             self.connection.settimeout(30)
             body = self.rfile.read(length)
             spec = json.loads(body)
@@ -373,7 +452,10 @@ class Handler(BaseHTTPRequestHandler):
                 existing = JOBS.get(spec.get("job_id"))
                 if existing:
                     if existing.fingerprint != fingerprint:
-                        return self._send(409, {"error": "job_id already used for a different request"})
+                        return self._send(
+                            409,
+                            {"error": "job_id already used for a different request"},
+                        )
                     return self._send(200, {"job_id": existing.id})
                 if len(JOBS) >= MAX_JOBS:
                     return self._send(429, {"error": "Executor job capacity reached"})
@@ -414,7 +496,9 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main():
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8765)
     args = parser.parse_args()
@@ -431,8 +515,12 @@ def main():
 
     server = ThreadingHTTPServer((args.host, args.port), Handler)
     server.token = token
-    print(f"AutoResearch-Harness remote executor on {args.host}:{args.port} "
-          f"(max {MAX_CONCURRENT} concurrent jobs, GPU: {gpu_info()})", flush=True)
+    print(
+        f"AutoResearch-Harness remote executor on {args.host}:{args.port} "
+        f"(max {MAX_CONCURRENT} concurrent jobs, GPU: {gpu_info()})",
+        flush=True,
+    )
+
     def stop(_signum, _frame):
         raise KeyboardInterrupt
 

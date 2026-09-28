@@ -56,7 +56,11 @@ def extract_workspace(data, root):
                 target.parent.mkdir(parents=True, exist_ok=True)
                 with archive.extractfile(member) as source, target.open("wb") as dest:
                     shutil.copyfileobj(source, dest)
-    return {m.name for m, _ in members if m.isfile()}
+    return {
+        target.relative_to(root).as_posix()
+        for member, target in members
+        if member.isfile()
+    }
 
 
 def pack_workspace(root, max_file_mb):

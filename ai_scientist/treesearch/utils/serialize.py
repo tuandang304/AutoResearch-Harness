@@ -40,7 +40,7 @@ G = TypeVar("G", bound=dataclasses_json.DataClassJsonMixin)
 
 
 def loads_json(s: str, cls: Type[G]) -> G:
-    """Deserialize JSON to AIDE dataclasses."""
+    """Deserialize JSON to research journal dataclasses."""
     obj_dict = json.loads(s)
     obj = cls.from_dict(obj_dict)
 

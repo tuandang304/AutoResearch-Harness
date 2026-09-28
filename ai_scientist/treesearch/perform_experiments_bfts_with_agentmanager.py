@@ -198,7 +198,7 @@ def perform_experiments_bfts(config_path: str):
                     equal=True,
                 ),
             ),
-            title=f'[b]AIDE is working on experiment: [bold green]"{cfg.exp_name}[/b]"',
+            title=f'[b]AutoResearch-Harness experiment: [bold green]"{cfg.exp_name}[/b]"',
             subtitle="Press [b]Ctrl+C[/b] to stop the run",
         )
 

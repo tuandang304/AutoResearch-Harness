@@ -86,6 +86,7 @@ AVAILABLE_LLMS = with_cli_models(AVAILABLE_LLMS)
         openai.InternalServerError,
         anthropic.RateLimitError,
     ),
+    max_tries=6,
 )
 @track_token_usage
 def get_batch_responses_from_llm(
@@ -295,6 +296,7 @@ def make_llm_call(client, model, temperature, system_message, prompt, n=1):
         openai.InternalServerError,
         anthropic.RateLimitError,
     ),
+    max_tries=6,
 )
 def get_response_from_llm(
     prompt,
@@ -305,6 +307,7 @@ def get_response_from_llm(
     msg_history=None,
     temperature=0.7,
 ) -> tuple[str, list[dict[str, Any]]]:
+    already_tracked = False
     msg = prompt
     if msg_history is None:
         msg_history = []
@@ -312,6 +315,7 @@ def get_response_from_llm(
     if is_cli_model(model):
         # Accept Anthropic-style histories too (list-of-blocks content).
         new_msg_history = msg_history + [{"role": "user", "content": msg}]
+        already_tracked = True
         response = make_llm_call(
             client,
             model,
@@ -370,6 +374,7 @@ def get_response_from_llm(
         new_msg_history = new_msg_history + [{"role": "assistant", "content": content}]
     elif "gpt" in model:
         new_msg_history = msg_history + [{"role": "user", "content": msg}]
+        already_tracked = True
         response = make_llm_call(
             client,
             model,
@@ -381,6 +386,7 @@ def get_response_from_llm(
         new_msg_history = new_msg_history + [{"role": "assistant", "content": content}]
     elif "o1" in model or "o3" in model:
         new_msg_history = msg_history + [{"role": "user", "content": msg}]
+        already_tracked = True
         response = make_llm_call(
             client,
             model,
@@ -480,6 +486,9 @@ def get_response_from_llm(
         new_msg_history = new_msg_history + [{"role": "assistant", "content": content}]
     else:
         raise ValueError(f"Model {model} not supported.")
+
+    if not already_tracked:
+        record_response(response, model=model, prompt=prompt, system_message=system_message)
 
     if print_debug:
         print()

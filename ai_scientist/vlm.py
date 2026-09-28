@@ -147,6 +147,7 @@ def prepare_vlm_prompt(msg, image_paths, max_images):
         openai.RateLimitError,
         openai.APITimeoutError,
     ),
+    max_tries=6,
 )
 def get_response_from_vlm(
     msg: str,
@@ -269,6 +270,7 @@ def extract_json_between_markers(llm_output: str) -> dict | None:
         openai.RateLimitError,
         openai.APITimeoutError,
     ),
+    max_tries=6,
 )
 def get_batch_responses_from_vlm(
     msg: str,

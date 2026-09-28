@@ -57,7 +57,9 @@ def load_remote_config() -> tuple[str, str]:
                 if not isinstance(cfg, dict):
                     raise ValueError("expected a JSON object")
             except (OSError, ValueError) as exc:
-                raise RemoteExecutorUnavailable(f"Invalid remote configuration at {path}") from exc
+                raise RemoteExecutorUnavailable(
+                    f"Invalid remote configuration at {path}"
+                ) from exc
             url, token = url or cfg.get("url"), token or cfg.get("token")
     if not (url and token):
         raise RemoteExecutorUnavailable(
@@ -68,10 +70,25 @@ def load_remote_config() -> tuple[str, str]:
     if not isinstance(url, str) or not isinstance(token, str):
         raise RemoteExecutorUnavailable("Remote url and token must be strings")
     parts = urlsplit(url)
-    if parts.scheme not in ("http", "https") or not parts.hostname or parts.username or parts.password or parts.query or parts.fragment:
-        raise RemoteExecutorUnavailable("Remote URL must be an HTTP(S) endpoint without credentials, query or fragment")
-    if parts.scheme == "http" and parts.hostname not in ("localhost", "127.0.0.1", "::1"):
-        raise RemoteExecutorUnavailable("Remote endpoints require HTTPS; HTTP is supported only on localhost")
+    if (
+        parts.scheme not in ("http", "https")
+        or not parts.hostname
+        or parts.username
+        or parts.password
+        or parts.query
+        or parts.fragment
+    ):
+        raise RemoteExecutorUnavailable(
+            "Remote URL must be an HTTP(S) endpoint without credentials, query or fragment"
+        )
+    if parts.scheme == "http" and parts.hostname not in (
+        "localhost",
+        "127.0.0.1",
+        "::1",
+    ):
+        raise RemoteExecutorUnavailable(
+            "Remote endpoints require HTTPS; HTTP is supported only on localhost"
+        )
     if any(c in token for c in "\r\n"):
         raise RemoteExecutorUnavailable("Invalid remote token")
     return url.rstrip("/"), token
@@ -92,8 +109,14 @@ class RemoteInterpreter:
         if not self.working_dir.is_dir():
             raise ValueError(f"Working directory {self.working_dir} does not exist")
         if timeout <= 0 or max_file_mb <= 0 or wait_minutes < 0:
-            raise ValueError("Timeout and file limit must be positive; wait_minutes must be nonnegative")
-        if Path(agent_file_name).name != agent_file_name or agent_file_name in ("", ".", "..") or "\\" in agent_file_name:
+            raise ValueError(
+                "Timeout and file limit must be positive; wait_minutes must be nonnegative"
+            )
+        if (
+            Path(agent_file_name).name != agent_file_name
+            or agent_file_name in ("", ".", "..")
+            or "\\" in agent_file_name
+        ):
             raise ValueError("agent_file_name must be a plain filename")
         self.timeout = timeout
         self.agent_file_name = agent_file_name
@@ -105,9 +128,13 @@ class RemoteInterpreter:
 
     # ------------------------------------------------------------------ http
 
-    def _request(self, method: str, path: str, **kwargs) -> requests.Response:
+    def _request(
+        self, method: str, path: str, *, _deadline=None, **kwargs
+    ) -> requests.Response:
         """HTTP request that waits (up to wait_minutes) for the executor to be reachable."""
         deadline = time.monotonic() + self.wait_minutes * 60
+        if _deadline is not None:
+            deadline = min(deadline, _deadline)
         warned = False
         while True:
             try:
@@ -126,7 +153,9 @@ class RemoteInterpreter:
                     )
                 # 502/503/504/530: tunnel up but Colab side gone or restarting
                 if 300 <= resp.status_code < 400:
-                    raise RemoteExecutorUnavailable("Remote endpoint redirected; update remote_executor.json")
+                    raise RemoteExecutorUnavailable(
+                        "Remote endpoint redirected; update remote_executor.json"
+                    )
                 if resp.status_code < 500 and resp.status_code != 429:
                     if warned:
                         logger.warning("Remote executor is reachable again")
@@ -161,7 +190,9 @@ class RemoteInterpreter:
         for rel in sent - received - set(skipped):
             safe_path(self.working_dir, rel).unlink(missing_ok=True)
         for rel in skipped:
-            logger.warning(f"Remote file {rel} is larger than {self.max_file_mb} MB; left on Colab")
+            logger.warning(
+                f"Remote file {rel} is larger than {self.max_file_mb} MB; left on Colab"
+            )
 
     # ------------------------------------------------------------ interface
 
@@ -198,11 +229,15 @@ class RemoteInterpreter:
             deadline = time.monotonic() + self.timeout + self.wait_minutes * 60 + 60
             while True:
                 if time.monotonic() >= deadline:
-                    raise RemoteExecutorUnavailable("Remote job exceeded its execution and queue/wait budget")
+                    raise RemoteExecutorUnavailable(
+                        "Remote job exceeded its execution and queue/wait budget"
+                    )
                 time.sleep(POLL_SECONDS)
-                resp = self._request("GET", f"/jobs/{self._job_id}")
+                resp = self._request("GET", f"/jobs/{self._job_id}", _deadline=deadline)
                 if resp.status_code == 404:  # executor restarted and lost the job
                     logger.warning(f"Remote job {self._job_id} was lost; resubmitting")
+                    # A restarted server may retain directories but lose its registry.
+                    spec["job_id"] = uuid.uuid4().hex
                     break
                 resp.raise_for_status()
                 status = resp.json()
@@ -216,7 +251,10 @@ class RemoteInterpreter:
             skipped = json.loads(resp.headers.get("X-Skipped-Files", "[]"))
             self._apply_workspace(resp.content, sent, skipped)
             if skipped:
-                logger.warning("Remote job %s retained for manual retrieval of skipped files (server TTL applies)", self._job_id)
+                logger.warning(
+                    "Remote job %s retained for manual retrieval of skipped files (server TTL applies)",
+                    self._job_id,
+                )
                 self._job_id = None
             else:
                 self.cleanup_session()
@@ -227,9 +265,15 @@ class RemoteInterpreter:
                 exec_time=r["exec_time"],
                 exc_type=r["exc_type"],
                 exc_info=r["exc_info"],
-                exc_stack=[tuple(s) for s in r["exc_stack"]] if r["exc_stack"] else r["exc_stack"],
+                exc_stack=(
+                    [tuple(s) for s in r["exc_stack"]]
+                    if r["exc_stack"]
+                    else r["exc_stack"]
+                ),
             )
-        raise RemoteExecutorUnavailable("Remote job was lost 3 times in a row; giving up")
+        raise RemoteExecutorUnavailable(
+            "Remote job was lost 3 times in a row; giving up"
+        )
 
     def cleanup_session(self):
         if self._job_id is not None:
@@ -295,7 +339,11 @@ def _check():
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Remote executor utilities")
-    parser.add_argument("--check", action="store_true", help="run a GPU smoke test on the remote executor")
+    parser.add_argument(
+        "--check",
+        action="store_true",
+        help="run a GPU smoke test on the remote executor",
+    )
     if parser.parse_args().check:
         raise SystemExit(0 if _check() else 1)
     parser.print_help()

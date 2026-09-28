@@ -65,8 +65,8 @@ PROVIDER_PRESETS = {
     "claude-code": {"big": "claude-code/opus", "small": "claude-code/sonnet"},
     "codex": {"big": "codex/default", "small": "codex/default"},
     "antigravity": {
-        "big": "antigravity/gemini-3.1-pro-high",
-        "small": "antigravity/gemini-3.8-flash-medium",
+        "big": "antigravity/default",
+        "small": "antigravity/default",
     },
 }
 
@@ -181,7 +181,10 @@ def _split_content(content: Any) -> tuple[str, list[str]]:
         elif part.get("type") == "image_url":
             iu = part["image_url"]
             images.append(iu["url"] if isinstance(iu, dict) else iu)
-        elif part.get("type") == "image" and part.get("source", {}).get("type") == "base64":
+        elif (
+            part.get("type") == "image"
+            and part.get("source", {}).get("type") == "base64"
+        ):
             src = part["source"]
             images.append(f"data:{src['media_type']};base64,{src['data']}")
     return "\n".join(texts), images
@@ -232,8 +235,13 @@ def _run(cmd: list[str], cwd: str, stdin: str | None) -> subprocess.CompletedPro
     proc = None
     try:
         proc = subprocess.Popen(
-            cmd, cwd=cwd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE, text=True, start_new_session=True,
+            cmd,
+            cwd=cwd,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            start_new_session=True,
         )
         out, err = proc.communicate(stdin, timeout=CLI_TIMEOUT)
         return subprocess.CompletedProcess(cmd, proc.returncode, out, err)
@@ -267,8 +275,14 @@ def _run_streaming(cmd: list[str], cwd: str, stdin: str, is_final) -> list[str]:
     """
     try:
         proc = subprocess.Popen(
-            cmd, cwd=cwd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE, text=True, errors="replace", start_new_session=True,
+            cmd,
+            cwd=cwd,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            errors="replace",
+            start_new_session=True,
         )
     except FileNotFoundError:
         raise CLIError(
@@ -295,9 +309,11 @@ def _run_streaming(cmd: list[str], cwd: str, stdin: str, is_final) -> list[str]:
             except (BrokenPipeError, OSError):
                 pass
 
-    threads = [threading.Thread(target=pump_stdout, daemon=True),
-               threading.Thread(target=lambda: stderr.extend(proc.stderr), daemon=True),
-               threading.Thread(target=send_stdin, daemon=True)]
+    threads = [
+        threading.Thread(target=pump_stdout, daemon=True),
+        threading.Thread(target=lambda: stderr.extend(proc.stderr), daemon=True),
+        threading.Thread(target=send_stdin, daemon=True),
+    ]
     start = time.monotonic()
     for thread in threads:
         thread.start()
@@ -356,18 +372,25 @@ def _run_claude_code(model, system, prompt, images, workdir):
         {"type": "user", "message": {"role": "user", "content": content}}
     )
     cmd = [
-        "claude", "-p",
-        "--input-format", "stream-json",
-        "--output-format", "stream-json",
+        "claude",
+        "-p",
+        "--input-format",
+        "stream-json",
+        "--output-format",
+        "stream-json",
         "--verbose",
-        "--tools", "",
+        "--tools",
+        "",
         "--safe-mode",
         "--no-session-persistence",
-        "--system-prompt", (system + "\n\n" if system else "") + _NO_TOOLS_NOTE,
+        "--system-prompt",
+        (system + "\n\n" if system else "") + _NO_TOOLS_NOTE,
     ]
     if model:
         cmd += ["--model", model]
-    lines = _run_streaming(cmd, workdir, stdin + "\n", lambda e: e.get("type") == "result")
+    lines = _run_streaming(
+        cmd, workdir, stdin + "\n", lambda e: e.get("type") == "result"
+    )
 
     result = None
     for line in lines:
@@ -411,27 +434,44 @@ def _run_codex(model, system, prompt, images, workdir):
 
     last_msg = os.path.join(workdir, "last_message.txt")
     cmd = [
-        "codex", "exec",
+        "codex",
+        "exec",
         "--json",
         "--skip-git-repo-check",
         "--ephemeral",
-        "--sandbox", "read-only",
-        "-C", workdir,
-        "-o", last_msg,
+        "--sandbox",
+        "read-only",
+        "-C",
+        workdir,
+        "-o",
+        last_msg,
         *image_args,
     ]
     if model:
         cmd += ["-m", model]
     cmd.append("-")  # read the prompt from stdin
-    proc = _run(cmd, workdir, full_prompt)
+    lines = _run_streaming(
+        cmd,
+        workdir,
+        full_prompt,
+        lambda e: e.get("type") in ("turn.completed", "turn.failed", "error"),
+    )
 
     usage = {"prompt": 0, "completion": 0, "cached": 0, "reasoning": 0}
     error = None
-    for line in proc.stdout.splitlines():
+    text = ""
+    for line in lines:
         try:
             event = json.loads(line)
         except json.JSONDecodeError:
             continue
+        if not isinstance(event, dict):
+            continue
+        if (
+            event.get("type") == "item.completed"
+            and event.get("item", {}).get("type") == "agent_message"
+        ):
+            text = event["item"].get("text", "")
         if event.get("type") == "turn.completed":
             u = event.get("usage", {})
             usage = {
@@ -442,14 +482,12 @@ def _run_codex(model, system, prompt, images, workdir):
             }
         elif event.get("type") in ("error", "turn.failed"):
             error = event
-    text = ""
-    if os.path.exists(last_msg):
+    if not text and os.path.exists(last_msg):
         with open(last_msg) as f:
             text = f.read()
-    if proc.returncode != 0 or error or not text.strip():
+    if error or not text.strip():
         raise CLIError(
-            f"codex exited with code {proc.returncode}: "
-            f"{json.dumps(error) if error else proc.stderr[-2000:]}"
+            f"codex failed: {json.dumps(error) if error else ''.join(lines)[-2000:]}"
         )
     return text, usage
 
@@ -465,7 +503,11 @@ def _run_antigravity(model, system, prompt, images, workdir):
         paths = []
         for i, url in enumerate(images):
             data, media_type = _image_bytes(url)
-            ext = _sniff_media_type(data, media_type).split("/")[-1].replace("jpeg", "jpg")
+            ext = (
+                _sniff_media_type(data, media_type)
+                .split("/")[-1]
+                .replace("jpeg", "jpg")
+            )
             path = os.path.join(workdir, f"image_{i}.{ext}")
             with open(path, "wb") as f:
                 f.write(data)
@@ -477,10 +519,19 @@ def _run_antigravity(model, system, prompt, images, workdir):
         )
 
     stdin = json.dumps({"event": "user", "message": {"content": full_prompt}})
-    cmd = ["agy", "-p=", "--input-format", "stream-json", "--output-format", "stream-json"]
+    cmd = [
+        "agy",
+        "-p=",
+        "--input-format",
+        "stream-json",
+        "--output-format",
+        "stream-json",
+    ]
     if model:
         cmd += ["--model", model]
-    lines = _run_streaming(cmd, workdir, stdin + "\n", lambda e: e.get("event") == "result")
+    lines = _run_streaming(
+        cmd, workdir, stdin + "\n", lambda e: e.get("event") == "result"
+    )
 
     result = None
     for line in lines:
@@ -490,7 +541,11 @@ def _run_antigravity(model, system, prompt, images, workdir):
             continue
         if event.get("event") == "result":
             result = event.get("result", {})
-    if not result or result.get("status") != "SUCCESS" or not result.get("response", "").strip():
+    if (
+        not result
+        or result.get("status") != "SUCCESS"
+        or not result.get("response", "").strip()
+    ):
         detail = (result or {}).get("error") or (result or {}).get("denied_actions")
         raise CLIError(
             f"agy failed: {detail or ''.join(lines)[-2000:]}"
@@ -598,7 +653,12 @@ class _Completions:
 
     def create(self, model=None, messages=None, n=1, **_ignored):
         model = model or self._client.model
-        choices, totals = [], {"prompt": 0, "completion": 0, "cached": 0, "reasoning": 0}
+        choices, totals = [], {
+            "prompt": 0,
+            "completion": 0,
+            "cached": 0,
+            "reasoning": 0,
+        }
         for i in range(n or 1):
             text, usage = complete(model, messages or [])
             for k in totals:
@@ -606,7 +666,9 @@ class _Completions:
             choices.append(
                 SimpleNamespace(
                     index=i,
-                    message=SimpleNamespace(role="assistant", content=text, tool_calls=None),
+                    message=SimpleNamespace(
+                        role="assistant", content=text, tool_calls=None
+                    ),
                     finish_reason="stop",
                 )
             )
@@ -620,7 +682,9 @@ class _Completions:
                 prompt_tokens=totals["prompt"],
                 completion_tokens=totals["completion"],
                 total_tokens=totals["prompt"] + totals["completion"],
-                completion_tokens_details=SimpleNamespace(reasoning_tokens=totals["reasoning"]),
+                completion_tokens_details=SimpleNamespace(
+                    reasoning_tokens=totals["reasoning"]
+                ),
                 prompt_tokens_details=SimpleNamespace(cached_tokens=totals["cached"]),
             ),
         )
