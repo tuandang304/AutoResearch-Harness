@@ -69,8 +69,20 @@ class PipelineTests(unittest.TestCase):
                 node, ExecutionResult(["ok"], 0.1, None), working, workspace, cfg
             )
             self.assertFalse(result["is_buggy"])
+            self.assertFalse(result["is_buggy_plots"])
+            from ai_scientist.treesearch.journal import Journal
+            journal = Journal()
+            journal.append(Node.from_dict(result, journal))
+            self.assertEqual(len(journal.good_nodes), 1)
             saved = root / "workspaces" / "logs" / "0-run" / "experiment_results"
             self.assertTrue(list(saved.rglob("experiment_data.npy")))
+            np.save(working / "experiment_data.npy", {"loss": np.array([float("nan")])})
+            failed = _finish_smoke_node(
+                Node(code="print('ok')", plan="smoke"),
+                ExecutionResult(["ok"], 0.1, None), working, workspace, cfg
+            )
+            self.assertTrue(failed["is_buggy"])
+            self.assertIn("non-finite", failed["analysis"])
 
     def test_smoke_validation_normalizes_torch_version_without_torch(self):
         import sys
