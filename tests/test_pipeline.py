@@ -14,6 +14,33 @@ from launch_scientist_bfts import main, find_pdf_path_for_review
 
 
 class PipelineTests(unittest.TestCase):
+    def test_project_paths_and_overrides_do_not_create_outputs(self):
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory)
+            (project / "ideas.json").write_text('[{"Name":"independent-study"}]')
+            config = load_run_config(ROOT / "configs/default.yaml")
+            config["exec"]["timeout"] = 123
+            (project / "config.yaml").write_text(yaml.safe_dump(config))
+            output = io.StringIO()
+            with redirect_stdout(output):
+                status = main(["--project", str(project), "--dry-run"])
+            self.assertEqual(status, 0)
+            resolved = json.loads(output.getvalue())
+            self.assertEqual(resolved["idea"], "independent-study")
+            self.assertEqual(resolved["output_dir"], str(project / "runs"))
+            self.assertEqual(resolved["config"]["exec"]["timeout"], 123)
+            self.assertFalse((project / "runs").exists())
+            output = io.StringIO()
+            with redirect_stdout(output):
+                status = main(["--project", str(project), "--dry-run",
+                               "--config", str(ROOT / "configs/default.yaml"),
+                               "--output-dir", str(project / "custom")])
+            self.assertEqual(status, 0)
+            resolved = json.loads(output.getvalue())
+            self.assertEqual(resolved["output_dir"], str(project / "custom"))
+            self.assertNotEqual(resolved["config"]["exec"]["timeout"], 123)
+            self.assertFalse((project / "custom").exists())
+
     def test_code_only_model_reply_does_not_waste_format_retries(self):
         from ai_scientist.treesearch.parallel_agent import MinimalAgent
         from types import SimpleNamespace
@@ -154,7 +181,7 @@ class PipelineTests(unittest.TestCase):
         from types import SimpleNamespace
         from ai_scientist.treesearch.agent_manager import AgentManager
 
-        config = load_run_config(ROOT / "configs/uav_lowlight_t4_smoke.yaml")
+        config = load_run_config(ROOT / "tests/fixtures/pipeline.yaml")
         self.assertEqual(config["agent"]["code"]["model"], "codex/gpt-6-sol")
         self.assertEqual(config["exec"]["backend"], "colab")
         manager = AgentManager.__new__(AgentManager)
@@ -211,7 +238,7 @@ class PipelineTests(unittest.TestCase):
             self.assertEqual(list(Path(directory).iterdir()), [])
 
     def test_validation_rejects_bad_workers_paths_and_timeouts(self):
-        original = load_run_config(ROOT / "bfts_config.yaml")
+        original = load_run_config(ROOT / "configs/default.yaml")
         for section, key, value in (
             ("agent", "num_workers", 0),
             ("exec", "timeout", float("nan")),

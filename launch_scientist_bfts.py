@@ -43,8 +43,10 @@ def parse_arguments(argv=None):
         prog="autoresearch",
         description="AutoResearch-Harness: experiments, papers and review",
     )
-    parser.add_argument("--config", type=Path, default=ROOT / "bfts_config.yaml")
-    parser.add_argument("--output-dir", type=Path, default=ROOT / "experiments")
+    parser.add_argument("--project", type=Path, default=ROOT / "projects" / "regularization",
+                        help="Project directory containing ideas.json and optional config.yaml")
+    parser.add_argument("--config", type=Path, help="Override project config.yaml or configs/default.yaml")
+    parser.add_argument("--output-dir", type=Path, help="Override project runs/ directory")
     parser.add_argument("--num-workers", type=int, help="Override agent.num_workers")
     parser.add_argument("--orchestrator-model", help="Model for research decisions, final writing and review")
     parser.add_argument("--worker-model", help="Model for implementation, debugging, metrics, plots and summaries")
@@ -79,7 +81,7 @@ def parse_arguments(argv=None):
     parser.add_argument(
         "--load_ideas",
         type=str,
-        default=str(ROOT / "examples" / "ideas.json"),
+        default=None,
         help="Path to a JSON file containing pregenerated ideas",
     )
     parser.add_argument(
@@ -473,6 +475,16 @@ def main(argv=None):
     previous_usage_log = os.environ.get("AUTORESEARCH_USAGE_LOG")
     previous_effort = os.environ.get("AUTORESEARCH_CODEX_REASONING_EFFORT")
     try:
+        args.project = args.project.resolve()
+        if not args.project.is_dir():
+            raise ValueError(f"Project directory does not exist: {args.project}")
+        if args.config is None:
+            project_config = args.project / "config.yaml"
+            args.config = project_config if project_config.is_file() else ROOT / "configs" / "default.yaml"
+        if args.load_ideas is None:
+            args.load_ideas = str(args.project / "ideas.json")
+        if args.output_dir is None:
+            args.output_dir = args.project / "runs"
         args.load_ideas = str(Path(args.load_ideas).resolve())
         args.config = args.config.resolve()
         args.output_dir = args.output_dir.resolve()
@@ -498,6 +510,7 @@ def main(argv=None):
                 json.dumps(
                     {
                         "idea": idea["Name"],
+                        "project": str(args.project),
                         "output_dir": str(args.output_dir),
                         "config": config,
                         "models": {

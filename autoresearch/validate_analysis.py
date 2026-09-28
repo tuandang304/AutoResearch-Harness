@@ -116,7 +116,7 @@ def validate(source, config, output):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("source", type=Path, help="Saved experiment result directory")
-    parser.add_argument("--config", type=Path, default=Path("configs/uav_lowlight_t4_smoke.yaml"))
+    parser.add_argument("--config", type=Path, default=Path("configs/default.yaml"))
     parser.add_argument("--output", type=Path, required=True, help="New directory for analysis checks")
     args = parser.parse_args()
     print(json.dumps(validate(args.source, args.config, args.output), indent=2))

@@ -117,6 +117,8 @@ def load_run_config(path, provider=None, backend=None, workers=None, orchestrato
     if provider:
         preset = PROVIDER_PRESETS[provider]
         agent = config.setdefault("agent", {})
+        if agent.get("orchestrator"):
+            agent["orchestrator"]["model"] = preset["big"]
         for role in ("code", "feedback", "vlm_feedback", "summary", "select_node"):
             setting = agent.setdefault(role, {"temp": 0.3})
             setting["model"] = preset["big" if role == "code" else "small"]

@@ -13,7 +13,7 @@ from launch_scientist_bfts import main
 class StrategyTests(unittest.TestCase):
     def test_worker_override_preserves_original_as_orchestrator(self):
         config = load_run_config(
-            ROOT / "configs/uav_lowlight_t4_smoke.yaml", worker="codex/test-worker"
+            ROOT / "tests/fixtures/pipeline.yaml", worker="codex/test-worker"
         )
         agent = OmegaConf.create(config["agent"])
         self.assertEqual(decision_model(agent).model, "codex/gpt-6-astra")
@@ -30,7 +30,7 @@ class StrategyTests(unittest.TestCase):
         output = io.StringIO()
         with contextlib.redirect_stdout(output):
             status = main([
-                "--config", str(ROOT / "configs/uav_lowlight_t4_smoke.yaml"),
+                "--config", str(ROOT / "tests/fixtures/pipeline.yaml"),
                 "--dry-run", "--orchestrator-model", "codex/gpt-6-sol",
                 "--worker-model", "codex/test-worker",
                 "--model_citation", "codex/test-citation",
@@ -44,4 +44,4 @@ class StrategyTests(unittest.TestCase):
 
     def test_empty_orchestrator_rejected(self):
         with self.assertRaises(ValueError):
-            load_run_config(ROOT / "bfts_config.yaml", orchestrator=" ")
+            load_run_config(ROOT / "configs/default.yaml", orchestrator=" ")

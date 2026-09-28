@@ -8,6 +8,9 @@ and `ai_scientist` package remain compatible with existing scripts.
 | Path | Responsibility |
 |---|---|
 | `autoresearch/config.py` | Validate ideas/config and resolve provider overrides |
+| `autoresearch/llm_strategy.py` | Orchestrator/worker role assignments |
+| `configs/default.yaml` | Topic-independent runtime defaults |
+| `projects/` | Independent study inputs and ignored run artifacts |
 | `launch_scientist_bfts.py` | Orchestrate one run, persist status, clean up children |
 | `ai_scientist/cli_llm.py` | CLI text/vision completions, process lifecycle and retries |
 | `ai_scientist/treesearch/backend/` | Tree-search model routing and structured responses |
@@ -57,6 +60,11 @@ notebook embeddings.
   name. Use `--output-dir` for an alternate output location.
 
 ## Changes in this development update
+
+Project selection resolves inputs and output directories before execution. See
+[project workflow](projects.md) for precedence and historical migration details.
+Project config files replace defaults rather than overlaying them. Dry runs must
+remain side-effect free. Test fixtures belong under tests/fixtures, not projects/.
 
 The user-facing documentation and search-tree title use AutoResearch-Harness.
 Historical provenance is separate from product documentation. The launcher now

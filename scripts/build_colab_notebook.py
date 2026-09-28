@@ -76,7 +76,7 @@ matplotlib and transformers.
 ## 4. Start the executor and a Cloudflare quick tunnel
 
 `MAX_CONCURRENT` = how many experiments may share the GPU at once. Keep
-`agent.num_workers` in `bfts_config.yaml` equal to it. 1–2 suits a T4 (16 GB);
+`agent.num_workers` in `configs/default.yaml` equal to it. 1–2 suits a T4 (16 GB);
 an L4 or A100 can take 3–4.
 """),
     code(r"""

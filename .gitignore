@@ -197,3 +197,8 @@ huggingface/
 
 # Remote GPU executor credentials (see notebooks/colab_gpu_executor.ipynb)
 remote_executor.json
+
+# Generated research artifacts stay inside their owning project.
+projects/*/runs/
+projects/*/archive/
+projects/*/artifacts/
