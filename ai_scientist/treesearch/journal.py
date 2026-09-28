@@ -20,6 +20,12 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
+
+def _serialized_path(value):
+    path = Path(value).resolve()
+    root = Path.cwd()
+    return str(path.relative_to(root)) if path.is_relative_to(root) else str(path)
+
 node_selection_spec = FunctionSpec(
     name="select_best_implementation",
     description="Select the best implementation based on comprehensive analysis",
@@ -237,7 +243,7 @@ class Node(DataClassJsonMixin):
             "exc_stack": self.exc_stack,
             "analysis": self.analysis,
             "exp_results_dir": (
-                str(Path(self.exp_results_dir).resolve().relative_to(os.getcwd()))
+                _serialized_path(self.exp_results_dir)
                 if self.exp_results_dir
                 else None
             ),
@@ -260,7 +266,7 @@ class Node(DataClassJsonMixin):
             "plots": self.plots,
             "plot_paths": (
                 [
-                    str(Path(p).resolve().relative_to(os.getcwd()))
+                    _serialized_path(p)
                     for p in self.plot_paths
                 ]
                 if self.plot_paths
@@ -270,11 +276,7 @@ class Node(DataClassJsonMixin):
                 {
                     **analysis,
                     "plot_path": (
-                        str(
-                            Path(analysis["plot_path"])
-                            .resolve()
-                            .relative_to(os.getcwd())
-                        )
+                        _serialized_path(analysis["plot_path"])
                         if analysis.get("plot_path")
                         else None
                     ),

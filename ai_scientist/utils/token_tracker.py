@@ -1,9 +1,13 @@
 from functools import wraps
 from typing import Dict, Optional, List
-import tiktoken
 from collections import defaultdict
 import asyncio
-from datetime import datetime
+from datetime import datetime, timezone
+import inspect
+import json
+import os
+from pathlib import Path
+import fcntl
 import logging
 
 
@@ -71,6 +75,17 @@ class TokenTracker:
         self.token_counts[model]["completion"] += completion_tokens
         self.token_counts[model]["reasoning"] += reasoning_tokens
         self.token_counts[model]["cached"] += cached_tokens
+        ledger = os.environ.get("AUTORESEARCH_USAGE_LOG")
+        if ledger:
+            event = {"model": model, "prompt": prompt_tokens, "completion": completion_tokens,
+                     "reasoning": reasoning_tokens, "cached": cached_tokens}
+            # Workers share an append-only ledger; process-local counters otherwise disappear.
+            with open(ledger, "a") as stream:
+                fcntl.flock(stream, fcntl.LOCK_EX)
+                stream.write(json.dumps(event) + "\n")
+                stream.flush()
+                fcntl.flock(stream, fcntl.LOCK_UN)
+
 
     def add_interaction(
         self,
@@ -86,7 +101,7 @@ class TokenTracker:
                 "system_message": system_message,
                 "prompt": prompt,
                 "response": response,
-                "timestamp": timestamp,
+                "timestamp": timestamp.isoformat() if isinstance(timestamp, datetime) else timestamp,
             }
         )
 
@@ -108,7 +123,7 @@ class TokenTracker:
         """Calculate the cost for a specific model based on token usage."""
         if model not in self.MODEL_PRICES:
             logging.warning(f"Price information not available for model {model}")
-            return 0.0
+            return None
 
         prices = self.MODEL_PRICES[model]
         tokens = self.token_counts[model]
@@ -124,15 +139,31 @@ class TokenTracker:
 
         return prompt_cost + cached_cost + completion_cost
 
-    def get_summary(self) -> Dict[str, Dict[str, int]]:
-        # return dict(self.token_counts)
-        """Get summary of token usage and costs for all models."""
+    def get_summary(self):
+        """Summarize all processes when a shared usage ledger is configured."""
+        ledger = os.environ.get("AUTORESEARCH_USAGE_LOG")
+        counts = self.token_counts
+        if ledger and Path(ledger).exists():
+            counts = defaultdict(lambda: {"prompt": 0, "completion": 0, "reasoning": 0, "cached": 0})
+            with open(ledger) as stream:
+                fcntl.flock(stream, fcntl.LOCK_SH)
+                for line in stream:
+                    try:
+                        event = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    for key in ("prompt", "completion", "reasoning", "cached"):
+                        counts[event["model"]][key] += event.get(key, 0)
+                fcntl.flock(stream, fcntl.LOCK_UN)
         summary = {}
-        for model, tokens in self.token_counts.items():
-            summary[model] = {
-                "tokens": tokens.copy(),
-                "cost (USD)": self.calculate_cost(model),
-            }
+        for model, tokens in counts.items():
+            prices = self.MODEL_PRICES.get(model)
+            cost = None
+            if prices:
+                cached = min(tokens["prompt"], tokens["cached"]) if "cached" in prices else 0
+                cost = ((tokens["prompt"] - cached) * prices["prompt"] +
+                        cached * prices.get("cached", 0) + tokens["completion"] * prices["completion"])
+            summary[model] = {"tokens": tokens.copy(), "cost (USD)": cost}
         return summary
 
 
@@ -140,83 +171,48 @@ class TokenTracker:
 token_tracker = TokenTracker()
 
 
+def record_response(result, model=None, prompt=None, system_message=None):
+    """Record SDK responses without assuming a provider's optional usage fields."""
+    usage = getattr(result, "usage", None)
+    if usage is None:
+        return  # high-level helpers return (text, history), already counted below
+    model = getattr(result, "model", None) or model or "unknown"
+    anthropic_usage = hasattr(usage, "input_tokens")
+    if anthropic_usage:
+        cached = getattr(usage, "cache_read_input_tokens", 0) or 0
+        prompt_tokens = (usage.input_tokens or 0) + cached + (getattr(usage, "cache_creation_input_tokens", 0) or 0)
+        completion = usage.output_tokens or 0
+        reasoning = 0
+        text = "\n".join(getattr(part, "text", "") for part in getattr(result, "content", []))
+    else:
+        prompt_tokens = getattr(usage, "prompt_tokens", 0) or 0
+        completion = getattr(usage, "completion_tokens", 0) or 0
+        cached = getattr(getattr(usage, "prompt_tokens_details", None), "cached_tokens", 0) or 0
+        reasoning = getattr(getattr(usage, "completion_tokens_details", None), "reasoning_tokens", 0) or 0
+        text = "\n".join(getattr(c.message, "content", "") or "" for c in getattr(result, "choices", []))
+    token_tracker.add_tokens(model, prompt_tokens, completion, reasoning, cached)
+    token_tracker.add_interaction(model, system_message, prompt, text,
+                                  getattr(result, "created", None) or datetime.now(timezone.utc).isoformat())
+
+
 def track_token_usage(func):
+    signature = inspect.signature(func)
+
+    def record(args, kwargs, result):
+        bound = signature.bind_partial(*args, **kwargs).arguments
+        record_response(result, model=bound.get("model"), prompt=bound.get("prompt"),
+                        system_message=bound.get("system_message"))
+
     @wraps(func)
     async def async_wrapper(*args, **kwargs):
-        prompt = kwargs.get("prompt")
-        system_message = kwargs.get("system_message")
-        if not prompt and not system_message:
-            raise ValueError(
-                "Either 'prompt' or 'system_message' must be provided for token tracking"
-            )
-
-        logging.info("args: ", args)
-        logging.info("kwargs: ", kwargs)
-
         result = await func(*args, **kwargs)
-        model = result.model
-        timestamp = result.created
-
-        if hasattr(result, "usage") and result.usage.completion_tokens_details is not None:
-            token_tracker.add_tokens(
-                model,
-                result.usage.prompt_tokens,
-                result.usage.completion_tokens,
-                result.usage.completion_tokens_details.reasoning_tokens,
-                (
-                    result.usage.prompt_tokens_details.cached_tokens
-                    if hasattr(result.usage, "prompt_tokens_details")
-                    else 0
-                ),
-            )
-            # Add interaction details
-            token_tracker.add_interaction(
-                model,
-                system_message,
-                prompt,
-                result.choices[
-                    0
-                ].message.content,  # Assumes response is in content field
-                timestamp,
-            )
+        record(args, kwargs, result)
         return result
 
     @wraps(func)
     def sync_wrapper(*args, **kwargs):
-        prompt = kwargs.get("prompt")
-        system_message = kwargs.get("system_message")
-        if not prompt and not system_message:
-            raise ValueError(
-                "Either 'prompt' or 'system_message' must be provided for token tracking"
-            )
         result = func(*args, **kwargs)
-        model = result.model
-        timestamp = result.created
-        logging.info("args: ", args)
-        logging.info("kwargs: ", kwargs)
-
-        if hasattr(result, "usage") and result.usage.completion_tokens_details is not None:
-            token_tracker.add_tokens(
-                model,
-                result.usage.prompt_tokens,
-                result.usage.completion_tokens,
-                result.usage.completion_tokens_details.reasoning_tokens,
-                (
-                    result.usage.prompt_tokens_details.cached_tokens
-                    if hasattr(result.usage, "prompt_tokens_details")
-                    else 0
-                ),
-            )
-            # Add interaction details
-            token_tracker.add_interaction(
-                model,
-                system_message,
-                prompt,
-                result.choices[
-                    0
-                ].message.content,  # Assumes response is in content field
-                timestamp,
-            )
+        record(args, kwargs, result)
         return result
 
     return async_wrapper if asyncio.iscoroutinefunction(func) else sync_wrapper

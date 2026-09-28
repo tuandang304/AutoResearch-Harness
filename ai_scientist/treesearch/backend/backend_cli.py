@@ -12,6 +12,7 @@ from ai_scientist.cli_llm import (
     parse_json_output,
 )
 from .utils import FunctionSpec, OutputType
+from ai_scientist.utils.token_tracker import token_tracker
 
 logger = logging.getLogger("ai-scientist")
 
@@ -64,6 +65,7 @@ def query(
         if feedback:
             attempt_messages = messages + [{"role": "user", "content": feedback}]
         text, usage = complete(model, attempt_messages)
+        token_tracker.add_tokens(model, usage.get("prompt", 0), usage.get("completion", 0), usage.get("reasoning", 0), usage.get("cached", 0))
         in_tokens += usage.get("prompt", 0)
         out_tokens += usage.get("completion", 0)
 

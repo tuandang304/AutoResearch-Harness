@@ -34,6 +34,7 @@ import threading
 import time
 import uuid
 from types import SimpleNamespace
+from collections import deque
 from typing import Any
 
 logger = logging.getLogger("ai-scientist")
@@ -90,6 +91,8 @@ def is_cli_model(model: str | None) -> bool:
 
 
 def split_cli_model(model: str) -> tuple[str, str | None]:
+    if not is_cli_model(model):
+        raise ValueError(f"Unsupported CLI model: {model!r}")
     provider, name = model.split("/", 1)
     return provider, (None if name in ("", "default") else name)
 
@@ -226,15 +229,14 @@ def flatten_messages(messages: list[dict]) -> tuple[str, str, list[str]]:
 
 
 def _run(cmd: list[str], cwd: str, stdin: str | None) -> subprocess.CompletedProcess:
+    proc = None
     try:
-        return subprocess.run(
-            cmd,
-            cwd=cwd,
-            input=stdin,
-            capture_output=True,
-            text=True,
-            timeout=CLI_TIMEOUT,
+        proc = subprocess.Popen(
+            cmd, cwd=cwd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, text=True, start_new_session=True,
         )
+        out, err = proc.communicate(stdin, timeout=CLI_TIMEOUT)
+        return subprocess.CompletedProcess(cmd, proc.returncode, out, err)
     except FileNotFoundError:
         raise CLIError(
             f"'{cmd[0]}' was not found on PATH. Install it and log in first "
@@ -242,6 +244,18 @@ def _run(cmd: list[str], cwd: str, stdin: str | None) -> subprocess.CompletedPro
         )
     except subprocess.TimeoutExpired:
         raise CLIError(f"{cmd[0]} timed out after {CLI_TIMEOUT}s")
+    finally:
+        if proc is not None:
+            _stop_process_group(proc)
+
+
+def _stop_process_group(proc):
+    # Kill descendants even if the CLI parent already exited.
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    proc.wait(timeout=5)
 
 
 def _run_streaming(cmd: list[str], cwd: str, stdin: str, is_final) -> list[str]:
@@ -254,7 +268,7 @@ def _run_streaming(cmd: list[str], cwd: str, stdin: str, is_final) -> list[str]:
     try:
         proc = subprocess.Popen(
             cmd, cwd=cwd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE, text=True, start_new_session=True,
+            stderr=subprocess.PIPE, text=True, errors="replace", start_new_session=True,
         )
     except FileNotFoundError:
         raise CLIError(
@@ -262,27 +276,38 @@ def _run_streaming(cmd: list[str], cwd: str, stdin: str, is_final) -> list[str]:
             f"(see README: 'LLM providers')."
         )
     lines: "queue.Queue[str | None]" = queue.Queue()
-    stderr: list[str] = []
+    stderr = deque(maxlen=100)
 
     def pump_stdout():
         for line in proc.stdout:
             lines.put(line)
         lines.put(None)
 
-    threading.Thread(target=pump_stdout, daemon=True).start()
-    threading.Thread(target=lambda: stderr.extend(proc.stderr), daemon=True).start()
-    try:
-        proc.stdin.write(stdin)
-        proc.stdin.close()
-    except BrokenPipeError:
-        pass
+    def send_stdin():
+        # A CLI that never reads stdin must not block the timeout loop.
+        try:
+            proc.stdin.write(stdin)
+        except (BrokenPipeError, OSError):
+            pass
+        finally:
+            try:
+                proc.stdin.close()
+            except (BrokenPipeError, OSError):
+                pass
+
+    threads = [threading.Thread(target=pump_stdout, daemon=True),
+               threading.Thread(target=lambda: stderr.extend(proc.stderr), daemon=True),
+               threading.Thread(target=send_stdin, daemon=True)]
+    start = time.monotonic()
+    for thread in threads:
+        thread.start()
 
     out: list[str] = []
-    start = time.time()
+    output_size = 0
     try:
         while True:
             limit = CLI_TIMEOUT if out else CLI_STARTUP_TIMEOUT
-            remaining = limit - (time.time() - start)
+            remaining = min(limit, CLI_TIMEOUT) - (time.monotonic() - start)
             if remaining <= 0:
                 what = "timed out" if out else "produced no output (hung at startup)"
                 raise CLIError(f"{cmd[0]} {what} after {limit}s")
@@ -293,18 +318,21 @@ def _run_streaming(cmd: list[str], cwd: str, stdin: str, is_final) -> list[str]:
             if line is None:
                 break
             out.append(line)
+            output_size += len(line)
+            if output_size > 32 * 1024 * 1024:
+                raise CLIError(f"{cmd[0]} exceeded the 32 MiB output limit")
             try:
-                if is_final(json.loads(line)):
+                event = json.loads(line)
+                if isinstance(event, dict) and is_final(event):
                     break
             except json.JSONDecodeError:
                 pass
     finally:
-        if proc.poll() is None:
-            try:
-                proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                os.killpg(proc.pid, signal.SIGKILL)
-                proc.wait()
+        _stop_process_group(proc)
+        for thread in threads:
+            thread.join(timeout=1)
+        proc.stdout.close()
+        proc.stderr.close()
     if not out and stderr:
         out.append(json.dumps({"stderr": "".join(stderr)[-2000:]}))
     return out
@@ -493,6 +521,8 @@ _RUNNERS = {
 def complete(model: str, messages: list[dict]) -> tuple[str, dict]:
     """Run one completion through the CLI named by ``model``."""
     provider, name = split_cli_model(model)
+    if CLI_RETRIES < 1 or CLI_TIMEOUT <= 0 or CLI_STARTUP_TIMEOUT <= 0:
+        raise CLIError("CLI retries and timeouts must be positive")
     system, prompt, images = flatten_messages(messages)
     root = _scratch_root(provider)
     os.makedirs(root, exist_ok=True)
@@ -501,7 +531,10 @@ def complete(model: str, messages: list[dict]) -> tuple[str, dict]:
     for attempt in range(CLI_RETRIES):
         workdir = tempfile.mkdtemp(prefix=f"{provider}_", dir=root)
         try:
-            return _RUNNERS[provider](name, system, prompt, images, workdir)
+            text, usage = _RUNNERS[provider](name, system, prompt, images, workdir)
+            if not isinstance(text, str) or not text.strip():
+                raise CLIError(f"{provider} returned an empty completion")
+            return text, usage
         except CLIError as e:
             last_err = e
             if "was not found on PATH" in str(e):

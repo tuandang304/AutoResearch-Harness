@@ -10,6 +10,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SERVER = (ROOT / "ai_scientist" / "remote" / "colab_server.py").read_text()
+WORKSPACE = (ROOT / "ai_scientist" / "remote" / "workspace.py").read_text()
 OUT = ROOT / "notebooks" / "colab_gpu_executor.ipynb"
 
 
@@ -41,14 +42,13 @@ own machine.
    AutoResearch-Harness folder.
 3. Locally: `python -m ai_scientist.treesearch.remote_interpreter --check`, then
    launch with `--exec_backend colab`.
-4. Keep this tab open. The last cell keeps the runtime busy and prints status.
+4. Keep this tab open. The monitoring cell prints status; it does not prevent
+   runtime timeouts or guarantee continued GPU access.
    If the runtime restarts, run all cells again and update `remote_executor.json`.
    Running experiments wait up to `exec.remote_wait_minutes` for it to come back.
 
-**Colab usage policy:** on the free tier, Colab disallows remote control and
-running distributed compute workers. This executor is driven from your
-machine, so use a paid plan (Pro, Pro+ or pay-as-you-go compute units), where
-those restrictions are lifted.
+**Colab usage policy:** check the current [Colab FAQ](https://research.google.com/colaboratory/faq.html)
+and your plan's restrictions before running a remotely controlled worker.
 
 **Security:** anyone with the URL *and* the token can run code on this runtime.
 Don't share them. A new token is generated every time step 4 runs.
@@ -57,6 +57,7 @@ Don't share them. A new token is generated every time step 4 runs.
     code("!nvidia-smi"),
     md("## 2. Write the executor server"),
     code("%%writefile /content/colab_server.py\n" + SERVER),
+    code("%%writefile /content/workspace.py\n" + WORKSPACE),
     md("""
 ## 3. Install packages that experiments commonly use
 
@@ -77,12 +78,16 @@ an L4 or A100 can take 3–4.
     code(r'''
 import json, os, re, secrets, subprocess, time, urllib.request
 
-MAX_CONCURRENT = 2
+MAX_CONCURRENT = 1
 PORT = 8765
 
 for p in ("server", "tunnel"):
     try:
+        globals()[p].terminate()
+        globals()[p].wait(timeout=10)
+    except subprocess.TimeoutExpired:
         globals()[p].kill()
+        globals()[p].wait()
     except Exception:
         pass
 
@@ -117,11 +122,17 @@ if url is None:
 
 time.sleep(3)
 print(open("/content/server.log").read())
+if server.poll() is not None or tunnel.poll() is not None:
+    raise RuntimeError("Server or tunnel exited; inspect /content/server.log and /content/tunnel.log")
+req = urllib.request.Request(f"http://127.0.0.1:{PORT}/health",
+                             headers={"Authorization": f"Bearer {TOKEN}"})
+with urllib.request.urlopen(req, timeout=15) as response:
+    assert json.load(response)["protocol_version"] == 2
 print("Paste this into remote_executor.json on your machine:\n")
 print(json.dumps({"url": url, "token": TOKEN}, indent=2))
 '''),
     md("""
-## 5. Keep alive and monitor
+## 5. Monitor the executor
 
 Leave this cell running. It prints the queue and GPU status every minute.
 Interrupting it does **not** stop the executor.
@@ -146,6 +157,24 @@ while True:
         break
     time.sleep(60)
 '''),
+    md("""
+## 6. Stop the executor and tunnel
+
+Interrupt the monitoring cell, then run this cell manually. It stops the
+executor, its experiments and the tunnel. It does not delete completed artifacts.
+"""),
+    code(r'''
+for name in ("server", "tunnel"):
+    process = globals().get(name)
+    if process is not None and process.poll() is None:
+        process.terminate()
+        try:
+            process.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait()
+print("Executor and tunnel stopped.")
+'''),
 ]
 
 nb = {
@@ -161,5 +190,7 @@ nb = {
 }
 
 OUT.parent.mkdir(exist_ok=True)
+for index, cell in enumerate(cells):
+    cell["id"] = f"autoresearch-{index:02d}"
 OUT.write_text(json.dumps(nb, indent=1) + "\n")
 print(f"wrote {OUT.relative_to(ROOT)}")

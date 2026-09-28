@@ -2,7 +2,7 @@ import json
 import os
 import re
 from typing import Any
-from ai_scientist.utils.token_tracker import track_token_usage
+from ai_scientist.utils.token_tracker import track_token_usage, record_response
 from ai_scientist.cli_llm import CLIClient, is_cli_model, with_cli_models
 
 import anthropic
@@ -99,6 +99,9 @@ def get_batch_responses_from_llm(
     n_responses=1,
 ) -> tuple[list[str], list[list[dict[str, Any]]]]:
     msg = prompt
+    if n_responses < 1:
+        raise ValueError("n_responses must be positive")
+    response = None
     if msg_history is None:
         msg_history = []
 
@@ -211,12 +214,14 @@ def get_batch_responses_from_llm(
                 model,
                 system_message,
                 print_debug=False,
-                msg_history=None,
+                msg_history=msg_history,
                 temperature=temperature,
             )
             content.append(c)
             new_msg_history.append(hist)
 
+    if response is not None and not is_cli_model(model):
+        record_response(response, model=model, prompt=prompt, system_message=system_message)
     if print_debug:
         # Just print the first one.
         print()

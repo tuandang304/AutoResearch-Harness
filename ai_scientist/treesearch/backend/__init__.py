@@ -82,4 +82,7 @@ def query(
         **model_kwargs,
     )
 
+    if not is_cli_model(model):
+        from ai_scientist.utils.token_tracker import token_tracker
+        token_tracker.add_tokens(model, in_tok_count, out_tok_count, 0, 0)
     return output

@@ -23,8 +23,11 @@ group, with the same semantics as ai_scientist/treesearch/interpreter.py
 
 import argparse
 import base64
-import io
+import binascii
+import hashlib
+import hmac
 import json
+import math
 import os
 import queue
 import shutil
@@ -32,17 +35,44 @@ import signal
 import subprocess
 import sys
 import tarfile
+import tempfile
 import threading
 import time
 import traceback
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+if __package__:
+    from .workspace import MAX_ARCHIVE_BYTES, extract_workspace, pack_workspace as pack_files
+else:  # standalone files embedded in the Colab notebook
+    from workspace import MAX_ARCHIVE_BYTES, extract_workspace, pack_workspace as pack_files
+
 JOBS_ROOT = os.environ.get("AISCI_JOBS_ROOT", "/content/aisci_jobs")
 MAX_CONCURRENT = int(os.environ.get("AISCI_MAX_CONCURRENT", "2"))
 MAX_OUTPUT_CHARS = 2_000_000
 JOB_TTL_SECONDS = 6 * 3600
 EXC_FILE = ".aisci_exc.json"
+MAX_REQUEST_BYTES = 2 * MAX_ARCHIVE_BYTES
+MAX_JOBS = 64
+
+
+def validate_spec(spec):
+    if not isinstance(spec, dict) or not isinstance(spec.get("code"), str):
+        raise ValueError("code must be a string")
+    for key, default, maximum in (("timeout", 3600, 86400), ("max_file_mb", 100, 512)):
+        value = spec.setdefault(key, default)
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or not 0 < value <= maximum:
+            raise ValueError(f"{key} must be positive and at most {maximum}")
+    name = spec.setdefault("agent_file_name", "runfile.py")
+    if not isinstance(name, str) or not name or name in (".", "..", EXC_FILE) or "/" in name or "\\" in name or "\x00" in name:
+        raise ValueError("agent_file_name must be a plain filename")
+    env = spec.setdefault("env_vars", {})
+    if not isinstance(env, dict) or any(not isinstance(k, str) or not k or "=" in k or "\x00" in k or not isinstance(v, str) or "\x00" in v for k, v in env.items()):
+        raise ValueError("env_vars must contain string environment names and values")
+    if "job_id" in spec and (not isinstance(spec["job_id"], str) or len(spec["job_id"]) != 32 or any(c not in "0123456789abcdef" for c in spec["job_id"])):
+        raise ValueError("job_id must be a 32-character lowercase hexadecimal ID")
+    if not isinstance(spec.get("workspace_tgz_b64", ""), str):
+        raise ValueError("workspace_tgz_b64 must be a base64 string")
 
 RUNNER_SOURCE = r'''
 import json, os, sys, traceback
@@ -100,13 +130,15 @@ def gpu_info() -> str:
 
 class Job:
     def __init__(self, spec: dict):
-        self.id = uuid.uuid4().hex
+        self.id = spec.get("job_id") or uuid.uuid4().hex
         self.spec = spec
         self.status = "queued"
         self.result = None
         self.proc: subprocess.Popen | None = None
         self.cancelled = False
         self.created = time.time()
+        self.finished = None
+        self.lock = threading.Lock()
         self.dir = os.path.join(JOBS_ROOT, self.id)
         self.ws = os.path.join(self.dir, "ws")
 
@@ -134,31 +166,52 @@ def run_job(job: Job) -> None:
         f.write(RUNNER_SOURCE)
 
     env = os.environ.copy()
+    # The control-plane secret is never passed to generated experiment code.
+    env.pop("AISCI_TOKEN", None)
     env.update({k: str(v) for k, v in (spec.get("env_vars") or {}).items()})
     env["PYTHONUNBUFFERED"] = "1"
     env.setdefault("MPLBACKEND", "Agg")
 
-    start = time.time()
-    job.proc = subprocess.Popen(
+    start = time.monotonic()
+    output = tempfile.TemporaryFile()
+    with job.lock:
+        if job.cancelled:
+            output.close()
+            return
+        job.proc = subprocess.Popen(
         [sys.executable, "-u", runner, agent_file, EXC_FILE],
-        cwd=job.ws, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        cwd=job.ws, env=env, stdout=output, stderr=subprocess.STDOUT,
         text=True, errors="replace", start_new_session=True,
-    )
+        )
     timed_out = False
     try:
-        out, _ = job.proc.communicate(timeout=timeout)
+        job.proc.wait(timeout=timeout)
     except subprocess.TimeoutExpired:
         timed_out = True
         try:
             os.killpg(job.proc.pid, signal.SIGINT)
-            out, _ = job.proc.communicate(timeout=60)
+            job.proc.wait(timeout=5)
         except (subprocess.TimeoutExpired, ProcessLookupError):
             try:
                 os.killpg(job.proc.pid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
-            out, _ = job.proc.communicate()
-    exec_time = time.time() - start
+            job.proc.wait()
+    finally:
+        # Also reap descendants left behind by a normally exited parent.
+        try:
+            os.killpg(job.proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        size = output.seek(0, os.SEEK_END)
+        output.seek(0)
+        raw = output.read(MAX_OUTPUT_CHARS)
+        if size > MAX_OUTPUT_CHARS:
+            output.seek(-MAX_OUTPUT_CHARS // 2, os.SEEK_END)
+            raw = raw[:MAX_OUTPUT_CHARS // 2] + b"\n[... output truncated ...]\n" + output.read()
+        output.close()
+        out = raw.decode("utf-8", errors="replace")
+    exec_time = time.monotonic() - start
 
     exc_type = exc_info = exc_stack = None
     exc_path = os.path.join(job.ws, EXC_FILE)
@@ -200,10 +253,10 @@ def run_job(job: Job) -> None:
 def worker_loop() -> None:
     while True:
         job = QUEUE.get()
-        if job.cancelled:
-            continue
-        job.status = "running"
         try:
+            if job.cancelled:
+                continue
+            job.status = "running"
             run_job(job)
         except Exception:
             job.result = {
@@ -213,7 +266,12 @@ def worker_loop() -> None:
                 "exc_info": {},
                 "exc_stack": [],
             }
-        job.status = "done"
+        finally:
+            job.status = "done"
+            job.finished = time.time()
+            if job.cancelled:
+                shutil.rmtree(job.dir, ignore_errors=True)
+            QUEUE.task_done()
 
 
 def janitor_loop() -> None:
@@ -221,7 +279,7 @@ def janitor_loop() -> None:
         time.sleep(600)
         now = time.time()
         with JOBS_LOCK:
-            stale = [j for j in JOBS.values() if j.status == "done" and now - j.created > JOB_TTL_SECONDS]
+            stale = [j for j in JOBS.values() if j.status == "done" and now - (j.finished or now) > JOB_TTL_SECONDS]
             for j in stale:
                 JOBS.pop(j.id, None)
         for j in stale:
@@ -229,20 +287,8 @@ def janitor_loop() -> None:
 
 
 def pack_workspace(ws: str, max_file_mb: float) -> tuple[bytes, list[str]]:
-    limit = max_file_mb * 1024 * 1024
-    buf, skipped = io.BytesIO(), []
-    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
-        for root, _dirs, files in os.walk(ws):
-            for name in files:
-                path = os.path.join(root, name)
-                rel = os.path.relpath(path, ws)
-                if os.path.islink(path):
-                    continue
-                if os.path.getsize(path) > limit:
-                    skipped.append(rel)
-                    continue
-                tar.add(path, arcname=rel)
-    return buf.getvalue(), skipped
+    data, _, skipped = pack_files(ws, max_file_mb)
+    return data, skipped
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -262,7 +308,7 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def _authorized(self) -> bool:
-        if self.headers.get("Authorization") == f"Bearer {self.server.token}":
+        if hmac.compare_digest(self.headers.get("Authorization", "").encode(), f"Bearer {self.server.token}".encode()):
             return True
         self._send(401, {"error": "unauthorized"})
         return False
@@ -283,6 +329,7 @@ class Handler(BaseHTTPRequestHandler):
                 states = [j.status for j in JOBS.values()]
             self._send(200, {
                 "ok": True,
+                "protocol_version": 2,
                 "gpu": gpu_info(),
                 "python": sys.version.split()[0],
                 "max_concurrent": MAX_CONCURRENT,
@@ -292,14 +339,17 @@ class Handler(BaseHTTPRequestHandler):
         elif len(parts) == 2 and parts[0] == "jobs":
             job = self._job(parts[1])
             if job:
-                self._send(200, {"status": job.status, "result": job.result})
+                self._send(200, {"status": job.status, "result": job.result, "created": job.created})
         elif len(parts) == 3 and parts[0] == "jobs" and parts[2] == "workspace":
             job = self._job(parts[1])
             if job is None:
                 return
             if job.status != "done":
                 return self._send(409, {"error": "job not finished"})
-            data, skipped = pack_workspace(job.ws, job.spec.get("max_file_mb", 100))
+            try:
+                data, skipped = pack_workspace(job.ws, job.spec.get("max_file_mb", 100))
+            except (ValueError, OSError) as exc:
+                return self._send(422, {"error": str(exc)})
             self._send(200, data, "application/gzip", {"X-Skipped-Files": json.dumps(skipped)})
         else:
             self._send(404, {"error": "not found"})
@@ -309,20 +359,36 @@ class Handler(BaseHTTPRequestHandler):
             return
         if self.path.strip("/") != "jobs":
             return self._send(404, {"error": "not found"})
-        length = int(self.headers.get("Content-Length", 0))
-        spec = json.loads(self.rfile.read(length))
-        job = Job(spec)
-        os.makedirs(job.ws, exist_ok=True)
-        tgz = base64.b64decode(spec.pop("workspace_tgz_b64", "") or b"")
-        if tgz:
-            with tarfile.open(fileobj=io.BytesIO(tgz), mode="r:gz") as tar:
-                try:
-                    tar.extractall(job.ws, filter="data")
-                except TypeError:  # Python without tarfile extraction filters
-                    tar.extractall(job.ws)
-        with JOBS_LOCK:
-            JOBS[job.id] = job
-        QUEUE.put(job)
+        job = None
+        try:
+            length = int(self.headers.get("Content-Length", 0))
+            if not 0 < length <= MAX_REQUEST_BYTES:
+                return self._send(413, {"error": "Request body is empty or exceeds size limit"})
+            self.connection.settimeout(30)
+            body = self.rfile.read(length)
+            spec = json.loads(body)
+            validate_spec(spec)
+            fingerprint = hashlib.sha256(body).hexdigest()
+            with JOBS_LOCK:
+                existing = JOBS.get(spec.get("job_id"))
+                if existing:
+                    if existing.fingerprint != fingerprint:
+                        return self._send(409, {"error": "job_id already used for a different request"})
+                    return self._send(200, {"job_id": existing.id})
+                if len(JOBS) >= MAX_JOBS:
+                    return self._send(429, {"error": "Executor job capacity reached"})
+                tgz = base64.b64decode(spec.pop("workspace_tgz_b64", ""), validate=True)
+                job = Job(spec)
+                job.fingerprint = fingerprint
+                os.makedirs(job.ws, exist_ok=False)
+                if tgz:
+                    extract_workspace(tgz, job.ws)
+                JOBS[job.id] = job
+                QUEUE.put(job)
+        except (ValueError, binascii.Error, tarfile.TarError, OSError) as exc:
+            if job is not None:
+                shutil.rmtree(job.dir, ignore_errors=True)
+            return self._send(400, {"error": str(exc)})
         self._send(200, {"job_id": job.id})
 
     def do_DELETE(self):
@@ -335,14 +401,15 @@ class Handler(BaseHTTPRequestHandler):
             job = JOBS.pop(parts[1], None)
         if job is None:
             return self._send(404, {"error": "unknown job"})
-        job.cancelled = True
-        if job.proc is not None and job.proc.poll() is None:
-            try:
-                os.killpg(job.proc.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-        # the worker thread may still be finishing up; remove files shortly after
-        threading.Timer(5, shutil.rmtree, args=(job.dir,), kwargs={"ignore_errors": True}).start()
+        with job.lock:
+            job.cancelled = True
+            if job.proc is not None:
+                try:
+                    os.killpg(job.proc.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+            if job.status == "done":
+                shutil.rmtree(job.dir, ignore_errors=True)
         self._send(200, {"deleted": True})
 
 
@@ -355,6 +422,8 @@ def main():
     token = os.environ.get("AISCI_TOKEN")
     if not token:
         sys.exit("Set AISCI_TOKEN to a random secret before starting the server.")
+    if MAX_CONCURRENT < 1:
+        sys.exit("AISCI_MAX_CONCURRENT must be at least 1")
     os.makedirs(JOBS_ROOT, exist_ok=True)
     for _ in range(MAX_CONCURRENT):
         threading.Thread(target=worker_loop, daemon=True).start()
@@ -364,7 +433,25 @@ def main():
     server.token = token
     print(f"AutoResearch-Harness remote executor on {args.host}:{args.port} "
           f"(max {MAX_CONCURRENT} concurrent jobs, GPU: {gpu_info()})", flush=True)
-    server.serve_forever()
+    def stop(_signum, _frame):
+        raise KeyboardInterrupt
+
+    signal.signal(signal.SIGTERM, stop)
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        with JOBS_LOCK:
+            for job in JOBS.values():
+                with job.lock:
+                    job.cancelled = True
+                    if job.proc is not None:
+                        try:
+                            os.killpg(job.proc.pid, signal.SIGKILL)
+                        except ProcessLookupError:
+                            pass
+        server.server_close()
 
 
 if __name__ == "__main__":

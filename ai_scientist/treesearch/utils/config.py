@@ -141,6 +141,8 @@ def load_cfg(path: Path = Path(__file__).parent / "config.yaml") -> Config:
 
 
 def prep_cfg(cfg: Config):
+    from autoresearch.config import validate_config
+    validate_config(OmegaConf.to_container(cfg, resolve=True))
     if cfg.data_dir is None:
         raise ValueError("`data_dir` must be provided.")
 
@@ -149,7 +151,7 @@ def prep_cfg(cfg: Config):
             "You must provide either a description of the task goal (`goal=...`) or a path to a plaintext file containing the description (`desc_file=...`)."
         )
 
-    if cfg.data_dir.startswith("example_tasks/"):
+    if str(cfg.data_dir).startswith("example_tasks/"):
         cfg.data_dir = Path(__file__).parent.parent / cfg.data_dir
     cfg.data_dir = Path(cfg.data_dir).resolve()
 

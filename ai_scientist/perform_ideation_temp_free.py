@@ -268,14 +268,14 @@ def generate_temp_free_idea(
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Generate AI scientist proposals - template free"
+        description="AutoResearch-Harness: generate research proposals"
     )
     parser.add_argument(
         "--model",
         type=str,
         default="gpt-4o-2024-05-13",
         choices=AVAILABLE_LLMS,
-        help="Model to use for AI Scientist.",
+        help="Model to use for research ideation.",
     )
     parser.add_argument(
         "--max-num-generations",

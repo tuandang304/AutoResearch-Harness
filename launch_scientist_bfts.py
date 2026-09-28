@@ -5,28 +5,13 @@ import shutil
 import os
 import re
 import sys
-from datetime import datetime
-from ai_scientist.llm import create_client
-from ai_scientist.cli_llm import PROVIDER_PRESETS
+from datetime import datetime, timezone
+from pathlib import Path
+import tempfile
 
+from autoresearch.config import ROOT, load_run_config, load_idea, idea_slug
+from ai_scientist.cli_llm import PROVIDER_PRESETS
 from contextlib import contextmanager
-from ai_scientist.treesearch.perform_experiments_bfts_with_agentmanager import (
-    perform_experiments_bfts,
-)
-from ai_scientist.treesearch.bfts_utils import (
-    idea_to_markdown,
-    edit_bfts_config_file,
-    apply_run_overrides,
-)
-from ai_scientist.perform_plotting import aggregate_plots
-from ai_scientist.perform_writeup import perform_writeup
-from ai_scientist.perform_icbinb_writeup import (
-    perform_writeup as perform_icbinb_writeup,
-    gather_citations,
-)
-from ai_scientist.perform_llm_review import perform_review, load_paper
-from ai_scientist.perform_vlm_review import perform_imgs_cap_ref_review
-from ai_scientist.utils.token_tracker import token_tracker
 
 
 def print_time():
@@ -34,10 +19,9 @@ def print_time():
 
 
 def save_token_tracker(idea_dir):
-    with open(osp.join(idea_dir, "token_tracker.json"), "w") as f:
-        json.dump(token_tracker.get_summary(), f)
-    with open(osp.join(idea_dir, "token_tracker_interactions.json"), "w") as f:
-        json.dump(token_tracker.get_interactions(), f)
+    from ai_scientist.utils.token_tracker import token_tracker
+    write_json(Path(idea_dir) / "token_tracker.json", token_tracker.get_summary())
+    write_json(Path(idea_dir) / "token_tracker_interactions.json", token_tracker.get_interactions())
 
 
 # Defaults for the per-stage model flags when --provider is not given.
@@ -50,8 +34,12 @@ DEFAULT_MODELS = {
 }
 
 
-def parse_arguments():
-    parser = argparse.ArgumentParser(description="Run AI scientist experiments")
+def parse_arguments(argv=None):
+    parser = argparse.ArgumentParser(description="AutoResearch-Harness: experiments, papers and review")
+    parser.add_argument("--config", type=Path, default=ROOT / "bfts_config.yaml")
+    parser.add_argument("--output-dir", type=Path, default=ROOT / "experiments")
+    parser.add_argument("--num-workers", type=int, help="Override agent.num_workers")
+    parser.add_argument("--dry-run", action="store_true", help="Validate inputs and print the resolved run without model calls or experiments")
     parser.add_argument(
         "--provider",
         type=str,
@@ -78,7 +66,7 @@ def parse_arguments():
     parser.add_argument(
         "--load_ideas",
         type=str,
-        default="ideas/i_cant_believe_its_not_better.json",
+        default=str(ROOT / "examples" / "ideas.json"),
         help="Path to a JSON file containing pregenerated ideas",
     )
     parser.add_argument(
@@ -155,13 +143,9 @@ def parse_arguments():
         action="store_true",
         help="If set, skip the review process",
     )
-    args = parser.parse_args()
-    for name, default in DEFAULT_MODELS.items():
-        if getattr(args, name) is None:
-            if args.provider:
-                preset = PROVIDER_PRESETS[args.provider]
-                default = preset["big"] if name == "model_writeup" else preset["small"]
-            setattr(args, name, default)
+    args = parser.parse_args(argv)
+    if args.writeup_retries < 1 or args.num_cite_rounds < 0 or args.attempt_id < 0:
+        parser.error("writeup-retries must be positive; citation rounds and attempt_id must be nonnegative")
     return args
 
 
@@ -176,30 +160,16 @@ def get_available_gpus(gpu_ids=None):
 
 
 def find_pdf_path_for_review(idea_dir):
-    pdf_files = [f for f in os.listdir(idea_dir) if f.endswith(".pdf")]
-    reflection_pdfs = [f for f in pdf_files if "reflection" in f]
-    if reflection_pdfs:
-        # First check if there's a final version
-        final_pdfs = [f for f in reflection_pdfs if "final" in f.lower()]
-        if final_pdfs:
-            # Use the final version if available
-            pdf_path = osp.join(idea_dir, final_pdfs[0])
-        else:
-            # Try to find numbered reflections
-            reflection_nums = []
-            for f in reflection_pdfs:
-                match = re.search(r"reflection[_.]?(\d+)", f)
-                if match:
-                    reflection_nums.append((int(match.group(1)), f))
+    """Select final, latest numbered reflection, or base PDF deterministically."""
+    files = list(Path(idea_dir).glob("*.pdf"))
+    if not files:
+        return None
 
-            if reflection_nums:
-                # Get the file with the highest reflection number
-                highest_reflection = max(reflection_nums, key=lambda x: x[0])
-                pdf_path = osp.join(idea_dir, highest_reflection[1])
-            else:
-                # Fall back to the first reflection PDF if no numbers found
-                pdf_path = osp.join(idea_dir, reflection_pdfs[0])
-    return pdf_path
+    def rank(path):
+        match = re.search(r"reflection[_.]?(\d+)", path.stem)
+        return ("final" in path.stem.lower(), int(match[1]) if match else -1, path.stat().st_mtime_ns, path.name)
+
+    return str(max(files, key=rank))
 
 
 @contextmanager
@@ -217,8 +187,29 @@ def redirect_stdout_stderr_to_file(log_file_path):
         log.close()
 
 
-if __name__ == "__main__":
-    args = parse_arguments()
+def run_pipeline(args, idea, config):
+    from ai_scientist.llm import create_client
+    from ai_scientist.cli_llm import PROVIDER_PRESETS
+    
+    from contextlib import contextmanager
+    from ai_scientist.treesearch.perform_experiments_bfts_with_agentmanager import (
+        perform_experiments_bfts,
+    )
+    from ai_scientist.treesearch.bfts_utils import (
+        idea_to_markdown,
+        edit_bfts_config_file,
+        apply_run_overrides,
+    )
+    from ai_scientist.perform_plotting import aggregate_plots
+    from ai_scientist.perform_writeup import perform_writeup
+    from ai_scientist.perform_icbinb_writeup import (
+        perform_writeup as perform_icbinb_writeup,
+        gather_citations,
+    )
+    from ai_scientist.perform_llm_review import perform_review, load_paper
+    from ai_scientist.perform_vlm_review import perform_imgs_cap_ref_review
+    from ai_scientist.utils.token_tracker import token_tracker
+    
     os.environ["AI_SCIENTIST_ROOT"] = os.path.dirname(os.path.abspath(__file__))
     print(f"Set AI_SCIENTIST_ROOT to {os.environ['AI_SCIENTIST_ROOT']}")
 
@@ -226,16 +217,15 @@ if __name__ == "__main__":
     available_gpus = get_available_gpus()
     print(f"Using GPUs: {available_gpus}")
 
-    with open(args.load_ideas, "r") as f:
-        ideas = json.load(f)
-        print(f"Loaded {len(ideas)} pregenerated ideas from {args.load_ideas}")
+    ideas = [idea]
+    args.idea_idx = 0
 
-    idea = ideas[args.idea_idx]
-
-    date = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    idea_dir = f"experiments/{date}_{idea['Name']}_attempt_{args.attempt_id}"
+    date = datetime.now().strftime("%Y-%m-%d_%H-%M-%S_%f")
+    idea_dir = str(args.output_dir / f"{date}_{idea_slug(idea['Name'])}_attempt_{args.attempt_id}")
+    args.run_dir = Path(idea_dir)
     print(f"Results will be saved in {idea_dir}")
-    os.makedirs(idea_dir, exist_ok=True)
+    os.makedirs(idea_dir, exist_ok=False)
+    os.environ["AUTORESEARCH_USAGE_LOG"] = str(Path(idea_dir) / "usage.jsonl")
 
     # Convert idea json to markdown file
     idea_path_md = osp.join(idea_dir, "idea.md")
@@ -284,7 +274,7 @@ if __name__ == "__main__":
     with open(idea_path_json, "w") as f:
         json.dump(ideas[args.idea_idx], f, indent=4)
 
-    config_path = "bfts_config.yaml"
+    config_path = args.config
     idea_config_path = edit_bfts_config_file(
         config_path,
         idea_dir,
@@ -299,8 +289,17 @@ if __name__ == "__main__":
             exec_backend=args.exec_backend,
         )
 
+    import yaml
+    with open(idea_config_path) as source:
+        run_config = yaml.safe_load(source)
+    config.update({key: run_config[key] for key in ("desc_file", "workspace_dir", "data_dir", "log_dir")})
+    with open(idea_config_path, "w") as dest:
+        yaml.safe_dump(config, dest)
+    update_run_status(args, "running", stage="experiments")
     perform_experiments_bfts(idea_config_path)
     experiment_results_dir = osp.join(idea_dir, "logs/0-run/experiment_results")
+    if not os.path.isdir(experiment_results_dir) or not os.listdir(experiment_results_dir):
+        raise RuntimeError("No experiment results were produced; inspect the tree-search logs")
     if os.path.exists(experiment_results_dir):
         shutil.copytree(
             experiment_results_dir,
@@ -308,6 +307,7 @@ if __name__ == "__main__":
             dirs_exist_ok=True,
         )
 
+    update_run_status(args, "running", stage="plotting")
     aggregate_plots(base_folder=idea_dir, model=args.model_agg_plots)
 
     shutil.rmtree(osp.join(idea_dir, "experiment_results"))
@@ -316,11 +316,14 @@ if __name__ == "__main__":
 
     if not args.skip_writeup:
         writeup_success = False
-        citations_text = gather_citations(
-            idea_dir,
-            num_cite_rounds=args.num_cite_rounds,
-            small_model=args.model_citation,
-        )
+        update_run_status(args, "running", stage="writeup")
+        citations_text = None
+        if args.writeup_type == "icbinb":
+            citations_text = gather_citations(
+                idea_dir,
+                num_cite_rounds=args.num_cite_rounds,
+                small_model=args.model_citation,
+            )
         for attempt in range(args.writeup_retries):
             print(f"Writeup attempt {attempt+1} of {args.writeup_retries}")
             if args.writeup_type == "normal":
@@ -329,7 +332,7 @@ if __name__ == "__main__":
                     small_model=args.model_writeup_small,
                     big_model=args.model_writeup,
                     page_limit=8,
-                    citations_text=citations_text,
+                    num_cite_rounds=args.num_cite_rounds,
                 )
             else:
                 writeup_success = perform_icbinb_writeup(
@@ -343,13 +346,16 @@ if __name__ == "__main__":
                 break
 
         if not writeup_success:
-            print("Writeup process did not complete successfully after all retries.")
+            raise RuntimeError("Writeup did not complete successfully after all retries")
 
     save_token_tracker(idea_dir)
 
     if not args.skip_review and not args.skip_writeup:
+        update_run_status(args, "running", stage="review")
         # Perform paper review if the paper exists
         pdf_path = find_pdf_path_for_review(idea_dir)
+        if pdf_path is None:
+            raise RuntimeError("Writeup reported success but produced no PDF")
         if os.path.exists(pdf_path):
             print("Paper found at: ", pdf_path)
             paper_content = load_paper(pdf_path)
@@ -364,56 +370,106 @@ if __name__ == "__main__":
                 json.dump(review_img_cap_ref, f, indent=4)
             print("Paper review completed.")
 
-    print("Start cleaning up processes")
-    # Kill all mp and torch processes associated with this experiment
+    return idea_dir
+
+
+def write_json(path, value):
+    """Atomically write metadata, including after interruptions."""
+    path = Path(path)
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", dir=path.parent, delete=False) as stream:
+            temporary = Path(stream.name)
+            json.dump(value, stream, indent=2, default=str)
+            stream.flush()
+            os.fsync(stream.fileno())
+        temporary.replace(path)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+
+
+def update_run_status(args, status, **details):
+    if getattr(args, "run_dir", None) is not None:
+        path = args.run_dir / "run_status.json"
+        state = json.loads(path.read_text()) if path.exists() else {"started_at": datetime.now(timezone.utc).isoformat()}
+        state.update(status=status, **details)
+        if status != "running":
+            state["finished_at"] = datetime.now(timezone.utc).isoformat()
+        write_json(path, state)
+
+
+def cleanup_children(previous):
+    """Stop only descendants created by this run; never scan other processes."""
     import psutil
-    import signal
-
-    # Get the current process and all its children
-    current_process = psutil.Process()
-    children = current_process.children(recursive=True)
-
-    # First try graceful termination
+    children = [child for child in psutil.Process().children(recursive=True) if child not in previous]
     for child in children:
         try:
-            child.send_signal(signal.SIGTERM)
-        except (psutil.NoSuchProcess, psutil.AccessDenied):
-            continue
-
-    # Wait briefly for processes to terminate
-    gone, alive = psutil.wait_procs(children, timeout=3)
-
-    # If any processes remain, force kill them
-    for process in alive:
+            child.terminate()
+        except psutil.Error:
+            pass
+    _, alive = psutil.wait_procs(children, timeout=3)
+    for child in alive:
         try:
-            process.kill()
-        except (psutil.NoSuchProcess, psutil.AccessDenied):
-            continue
+            child.kill()
+        except psutil.Error:
+            pass
 
-    # Additional cleanup: find orphaned processes from this run. Forked workers
-    # keep this launcher's command line; anything else must reference this
-    # run's experiment dir. Unrelated python processes are left alone.
-    own_cmdline = " ".join(current_process.cmdline())
-    run_dir = osp.abspath(idea_dir)
-    for proc in psutil.process_iter(["name", "cmdline"]):
+
+def main(argv=None):
+    args = parse_arguments(argv)
+    previous = None
+    previous_cwd = Path.cwd()
+    previous_usage_log = os.environ.get("AUTORESEARCH_USAGE_LOG")
+    try:
+        args.load_ideas = str(Path(args.load_ideas).resolve())
+        args.config = args.config.resolve()
+        args.output_dir = args.output_dir.resolve()
+        config = load_run_config(args.config, args.provider, args.exec_backend, args.num_workers)
+        idea = load_idea(args.load_ideas, args.idea_idx)
+        for name in DEFAULT_MODELS:
+            if getattr(args, name) is None:
+                role = "code" if name == "model_writeup" else "feedback"
+                setattr(args, name, config["agent"][role]["model"])
+        if args.load_code and not Path(args.load_ideas).with_suffix(".py").is_file():
+            raise ValueError("--load_code needs a Python file next to the ideas JSON")
+        if args.add_dataset_ref and not (ROOT / "hf_dataset_reference.py").is_file():
+            raise ValueError("--add_dataset_ref needs hf_dataset_reference.py in the repository")
+        if args.dry_run:
+            print(json.dumps({"idea": idea["Name"], "output_dir": str(args.output_dir), "config": config,
+                              "models": {k: v for k, v in vars(args).items() if k.startswith("model_")}}, indent=2))
+            return 0
+        os.environ["AI_SCIENTIST_ROOT"] = str(ROOT)
+        if config["exec"].get("backend") == "colab":
+            from ai_scientist.treesearch.remote_interpreter import load_remote_config
+            load_remote_config()
+        import psutil
+        previous = set(psutil.Process().children(recursive=True))
+        os.chdir(ROOT)  # legacy templates use repository-relative paths
+        run_pipeline(args, idea, config)
+        update_run_status(args, "completed")
+        return 0
+    except KeyboardInterrupt:
+        update_run_status(args, "interrupted")
+        print("Run interrupted; outputs retained.", file=sys.stderr)
+        return 130
+    except Exception as exc:
+        update_run_status(args, "failed", error=str(exc))
+        print(f"AutoResearch-Harness: {exc}", file=sys.stderr)
+        return 1
+    finally:
         try:
-            if proc.pid == current_process.pid:
-                continue
-            cmdline = " ".join(proc.cmdline())
-            if cmdline == own_cmdline or run_dir in cmdline:
-                proc.send_signal(signal.SIGTERM)
-                proc.wait(timeout=3)
-                if proc.is_running():
-                    proc.kill()
-        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.TimeoutExpired):
-            continue
+            if getattr(args, "run_dir", None) is not None:
+                save_token_tracker(args.run_dir)
+        finally:
+            if previous is not None:
+                cleanup_children(previous)
+            os.chdir(previous_cwd)
+            if previous_usage_log is None:
+                os.environ.pop("AUTORESEARCH_USAGE_LOG", None)
+            else:
+                os.environ["AUTORESEARCH_USAGE_LOG"] = previous_usage_log
 
-    # Finally, terminate the current process
-    # current_process.send_signal(signal.SIGTERM)
-    # try:
-    #     current_process.wait(timeout=3)
-    # except psutil.TimeoutExpired:
-    #     current_process.kill()
 
-    # exit the program
-    sys.exit(0)
+if __name__ == "__main__":
+    raise SystemExit(main())
