@@ -209,6 +209,8 @@ def perform_experiments_bfts(config_path: str):
     )
 
     manager.run(exec_callback=create_exec_callback(status), step_callback=step_callback)
+    if not any(journal.good_nodes for journal in manager.journals.values()):
+        raise RuntimeError("Experiment search ended without a working implementation")
 
     manager_pickle_path = cfg.log_dir / "manager.pkl"
     try:

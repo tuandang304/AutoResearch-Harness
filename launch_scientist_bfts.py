@@ -154,6 +154,10 @@ def parse_arguments(argv=None):
         action="store_true",
         help="If set, skip the review process",
     )
+    parser.add_argument(
+        "--experiments-only", action="store_true",
+        help="Stop after experiment artifacts; skip final plot aggregation, paper and review",
+    )
     args = parser.parse_args(argv)
     if args.writeup_retries < 1 or args.num_cite_rounds < 0 or args.attempt_id < 0:
         parser.error(
@@ -328,6 +332,8 @@ def run_pipeline(args, idea, config):
         raise RuntimeError(
             "No experiment results were produced; inspect the tree-search logs"
         )
+    if args.experiments_only:
+        return
     if os.path.exists(experiment_results_dir):
         shutil.copytree(
             experiment_results_dir,

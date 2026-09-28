@@ -72,6 +72,7 @@ class AgentConfig:
 
     summary: Optional[StageConfig] = None
     select_node: Optional[StageConfig] = None
+    max_stages: int = 4
 
 @dataclass
 class ExecConfig:

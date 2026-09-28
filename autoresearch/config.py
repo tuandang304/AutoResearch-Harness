@@ -19,6 +19,9 @@ def validate_config(config):
         if not isinstance(config.get(section), dict):
             raise ValueError(f"Configuration needs a {section} mapping")
     agent, execution = config["agent"], config["exec"]
+    max_stages = agent.get("max_stages", 4)
+    if isinstance(max_stages, bool) or not isinstance(max_stages, int) or not 1 <= max_stages <= 4:
+        raise ValueError("agent.max_stages must be an integer between 1 and 4")
     if agent.get("type") != "parallel":
         raise ValueError("agent.type must be parallel (the supported implementation)")
     for section in ("search", "multi_seed_eval", "stages"):

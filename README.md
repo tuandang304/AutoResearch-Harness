@@ -18,6 +18,8 @@ a finding is novel or correct.
 
 ## Start here
 
+For a small GPU pipeline check, see the [low-light UAV T4 smoke test](docs/uav-lowlight-smoke.md).
+
 Linux and Python 3.11 are the local development baseline.
 
 ```bash

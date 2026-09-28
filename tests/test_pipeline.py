@@ -14,6 +14,41 @@ from launch_scientist_bfts import main, find_pdf_path_for_review
 
 
 class PipelineTests(unittest.TestCase):
+    def test_smoke_configuration_and_stage_limit(self):
+        from types import SimpleNamespace
+        from ai_scientist.treesearch.agent_manager import AgentManager
+
+        config = load_run_config(ROOT / "configs/uav_lowlight_t4_smoke.yaml")
+        self.assertEqual(config["agent"]["code"]["model"], "codex/gpt-6-sol")
+        self.assertEqual(config["exec"]["backend"], "colab")
+        manager = AgentManager.__new__(AgentManager)
+        manager.cfg = SimpleNamespace(agent=SimpleNamespace(max_stages=1))
+        stage = SimpleNamespace(name="1_initial_implementation_1_preliminary", stage_number=1, max_iterations=2)
+        self.assertIsNone(manager._create_next_main_stage(stage, None))
+        manager.journals = {stage.name: SimpleNamespace(nodes=[1, 2], good_nodes=[2])}
+        self.assertEqual(manager._check_stage_completion(stage), (True, "Found working implementation"))
+        for value in (0, 5, True, 1.5):
+            invalid = copy.deepcopy(config)
+            invalid["agent"]["max_stages"] = value
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                validate_config(invalid)
+
+    def test_experiments_only_skips_final_plotting_and_paper(self):
+        def experiments(config_path):
+            config = yaml.safe_load(Path(config_path).read_text())
+            path = Path(config["log_dir"]) / "0-run" / "experiment_results"
+            path.mkdir(parents=True)
+            (path / "result.txt").write_text("fixture")
+
+        with tempfile.TemporaryDirectory() as directory, ExitStack() as stack:
+            stack.enter_context(redirect_stdout(io.StringIO()))
+            stack.enter_context(patch("ai_scientist.treesearch.perform_experiments_bfts_with_agentmanager.perform_experiments_bfts", side_effect=experiments))
+            plots = stack.enter_context(patch("ai_scientist.perform_plotting.aggregate_plots"))
+            writer = stack.enter_context(patch("ai_scientist.perform_writeup.perform_writeup"))
+            self.assertEqual(main(["--experiments-only", "--output-dir", directory]), 0)
+            plots.assert_not_called()
+            writer.assert_not_called()
+
     def test_dry_run_resolves_all_roles_and_explicit_overrides(self):
         with tempfile.TemporaryDirectory() as directory, io.StringIO() as output, redirect_stdout(
             output
