@@ -28,6 +28,7 @@ def validate_config(config):
         if not isinstance(agent.get(section), dict):
             raise ValueError(f"agent.{section} must be a mapping")
     counts = {
+        "worker_timeout": agent.get("worker_timeout", 7200),
         "num_workers": agent.get("num_workers"),
         "steps": agent.get("steps"),
         "multi_seed_eval.num_seeds": agent["multi_seed_eval"].get("num_seeds"),
@@ -37,6 +38,10 @@ def validate_config(config):
     for label, value in counts.items():
         if isinstance(value, bool) or not isinstance(value, int) or value < 1:
             raise ValueError(f"agent.{label} must be a positive integer")
+    if not isinstance(execution.get("local_postprocessing", False), bool):
+        raise ValueError("exec.local_postprocessing must be a boolean")
+    if not isinstance(agent.get("smoke_test", False), bool):
+        raise ValueError("agent.smoke_test must be a boolean")
     depth = agent["search"].get("max_debug_depth")
     if isinstance(depth, bool) or not isinstance(depth, int) or depth < 0:
         raise ValueError("agent.search.max_debug_depth must be a nonnegative integer")

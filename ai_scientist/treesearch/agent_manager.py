@@ -740,7 +740,8 @@ Your research idea:\n\n
                                             current_substage,
                                             self.journals[current_substage.name],
                                         )
-                                    agent._run_plot_aggregation(best_node, seed_nodes)
+                                    if not self.cfg.agent.smoke_test:
+                                        agent._run_plot_aggregation(best_node, seed_nodes)
                                     if step_callback:
                                         step_callback(
                                             current_substage,

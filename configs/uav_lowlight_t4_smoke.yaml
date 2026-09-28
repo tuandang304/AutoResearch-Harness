@@ -14,6 +14,7 @@ exec:
   backend: colab
   remote_max_file_mb: 25
   remote_wait_minutes: 2
+  local_postprocessing: true
 generate_report: false
 report: {model: codex/gpt-6-sol, temp: 0.2}
 experiment: {num_syn_datasets: 1}
@@ -22,6 +23,8 @@ agent:
   type: parallel
   num_workers: 1
   max_stages: 1
+  worker_timeout: 1800
+  smoke_test: true
   steps: 2
   stages:
     stage1_max_iters: 2

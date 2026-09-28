@@ -73,6 +73,8 @@ class AgentConfig:
     summary: Optional[StageConfig] = None
     select_node: Optional[StageConfig] = None
     max_stages: int = 4
+    worker_timeout: int = 7200
+    smoke_test: bool = False
 
 @dataclass
 class ExecConfig:
@@ -83,6 +85,7 @@ class ExecConfig:
     backend: str = "local"
     remote_max_file_mb: float = 100
     remote_wait_minutes: float = 60
+    local_postprocessing: bool = False
 
 
 @dataclass

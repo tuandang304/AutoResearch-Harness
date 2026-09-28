@@ -325,6 +325,8 @@ def _check():
         interp = RemoteInterpreter(d, timeout=120, wait_minutes=0.5)
         res = interp.run(
             "import os, torch\n"
+            "os.makedirs('working', exist_ok=True)\n"
+            "assert torch.cuda.is_available(), 'CUDA GPU required for this check'\n"
             "print('torch', torch.__version__, 'cuda available:', torch.cuda.is_available())\n"
             "if torch.cuda.is_available(): print('device:', torch.cuda.get_device_name(0))\n"
             "x = torch.randn(2048, 2048, device='cuda' if torch.cuda.is_available() else 'cpu')\n"

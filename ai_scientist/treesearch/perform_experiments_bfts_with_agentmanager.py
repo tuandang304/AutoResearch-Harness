@@ -1,6 +1,4 @@
-import atexit
 import logging
-import shutil
 import json
 import pickle
 from . import backend
@@ -70,11 +68,8 @@ def perform_experiments_bfts(config_path: str):
     with Status("Preparing agent workspace (copying and extracting files) ..."):
         prep_agent_workspace(cfg)
 
-    def cleanup():
-        if global_step == 0:
-            shutil.rmtree(cfg.workspace_dir)
-
-    atexit.register(cleanup)
+    # Keep partial workspaces even if no journal node completed. A timeout or
+    # interruption can happen after successful training but before review.
 
     manager = AgentManager(
         task_desc=task_desc,

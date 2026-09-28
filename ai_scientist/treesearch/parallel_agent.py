@@ -22,10 +22,144 @@ from rich import print
 from pathlib import Path
 import base64
 import sys
+import shutil
 
 logger = logging.getLogger("ai-scientist")
 
 ExecCallbackType = Callable[[str, bool], ExecutionResult]
+
+
+def _finish_smoke_node(child_node, exec_result, working_dir, workspace, cfg):
+    """Deterministically validate and retain a smoke run without more LLM calls."""
+    import numpy as np
+
+    child_node.absorb_exec_result(exec_result)
+    data_files = sorted(Path(working_dir).glob("*.npy"))
+    plot_files = sorted(Path(working_dir).glob("*.png"))
+    problems = []
+    if exec_result.exc_type is not None:
+        problems.append(f"execution failed: {exec_result.exc_type}")
+    if not data_files:
+        problems.append("no .npy experiment artifact")
+    if not plot_files:
+        problems.append("no .png experiment plot")
+    def normalize(value):
+        if type(value).__module__.startswith("torch") or (
+            type(value).__name__ == "TorchVersion" and isinstance(value, str)
+        ):
+            return str(value)
+        if isinstance(value, dict):
+            return {key: normalize(item) for key, item in value.items()}
+        if isinstance(value, list):
+            return [normalize(item) for item in value]
+        if isinstance(value, tuple):
+            return tuple(normalize(item) for item in value)
+        if isinstance(value, np.ndarray) and value.dtype == object:
+            items = [normalize(item) for item in value.flat]
+            return np.asarray(items, dtype=object).reshape(value.shape)
+        return value
+
+    def finite(value):
+        if isinstance(value, dict):
+            return all(finite(item) for item in value.values())
+        if isinstance(value, (list, tuple)):
+            return all(finite(item) for item in value)
+        if isinstance(value, np.ndarray):
+            if value.dtype == object:
+                return all(finite(item) for item in value.flat)
+            return value.dtype.kind not in "fci" or bool(np.isfinite(value).all())
+        if isinstance(value, (float, np.floating, complex, np.complexfloating)):
+            return bool(np.isfinite(value))
+        return True
+
+    for path in data_files:
+        try:
+            try:
+                value = np.load(path, allow_pickle=True)
+            except ModuleNotFoundError as exc:
+                if exc.name != "torch":
+                    raise
+                # torch.__version__ is a TorchVersion (str subclass). Generated
+                # metadata should not force a local torch installation.
+                import sys
+                import types
+
+                class TorchVersion(str):
+                    pass
+
+                torch_stub = types.ModuleType("torch")
+                version_stub = types.ModuleType("torch.torch_version")
+                version_stub.TorchVersion = TorchVersion
+                torch_stub.torch_version = version_stub
+                names = ("torch", "torch.torch_version")
+                previous = {name: sys.modules.get(name) for name in names}
+                sys.modules["torch"] = torch_stub
+                sys.modules["torch.torch_version"] = version_stub
+                try:
+                    value = np.load(path, allow_pickle=True)
+                finally:
+                    for name, module in previous.items():
+                        if module is None:
+                            sys.modules.pop(name, None)
+                        else:
+                            sys.modules[name] = module
+            normalized = normalize(value)
+            if not finite(normalized):
+                problems.append(f"non-finite numeric value in {path.name}")
+            elif normalized is not value:
+                import tempfile
+                with tempfile.NamedTemporaryFile(
+                    dir=path.parent, suffix=".npy", delete=False
+                ) as temporary:
+                    temporary_path = Path(temporary.name)
+                    np.save(temporary, normalized)
+                try:
+                    os.replace(temporary_path, path)
+                finally:
+                    temporary_path.unlink(missing_ok=True)
+        except Exception as exc:
+            problems.append(f"cannot load {path.name}: {exc}")
+
+    child_node.analysis = (
+        "; ".join(problems)
+        if problems
+        else "Smoke validation passed: execution succeeded and numpy artifacts load."
+    )
+    child_node.is_buggy = bool(problems)
+    child_node.is_buggy_plots = bool(problems)
+    child_node.plots_generated = bool(plot_files)
+    child_node.metric = (
+        WorstMetricValue()
+        if problems
+        else MetricValue(
+            value=1.0,
+            maximize=True,
+            name="smoke_validation",
+            description="Successful execution with loadable experiment artifacts",
+        )
+    )
+
+    base_dir = Path(cfg.workspace_dir).parent
+    run_name = Path(cfg.workspace_dir).name
+    result_dir = (
+        base_dir / "logs" / run_name / "experiment_results"
+        / f"experiment_{child_node.id}_proc_{os.getpid()}"
+    )
+    result_dir.mkdir(parents=True, exist_ok=True)
+    for source in [
+        Path(workspace, "experiment_code.py"),
+        Path(workspace, "execution_result.json"),
+        *data_files,
+        *plot_files,
+    ]:
+        if source.is_file():
+            target = result_dir / source.name
+            shutil.copy2(source, target)
+            if source.suffix.lower() == ".png":
+                child_node.plot_paths.append(str(target.resolve()))
+                child_node.plots.append(str(target.resolve()))
+    child_node.exp_results_dir = result_dir
+    return child_node.to_dict()
 
 
 def _safe_pickle_test(obj, name="object"):
@@ -725,6 +859,11 @@ class MinimalAgent:
             "AVAILABLE DATA: ",
             "Experiment Data: experiment_data.npy",
         ]
+        if self.cfg.exec.local_postprocessing:
+            prompt_guideline.append(
+                "This code runs on a CPU-only local machine without torch. "
+                "Use numpy, matplotlib and the standard library only; never retrain."
+            )
         prompt_guideline += [
             "REQUIREMENTS: ",
             "The code should start with:",
@@ -1179,7 +1318,8 @@ class ParallelAgent:
             self.num_workers = min(self.num_workers, self.num_gpus)
             logger.info(f"Limiting workers to {self.num_workers} to match GPU count")
 
-        self.timeout = self.cfg.exec.timeout
+        # A node includes model calls, training, transfers and visual review.
+        self.timeout = self.cfg.agent.worker_timeout
         self.executor = ProcessPoolExecutor(max_workers=self.num_workers)
         self._is_shutdown = False
         # Define the metric once at initialization
@@ -1286,6 +1426,7 @@ class ParallelAgent:
 
             # Add seed to node code
             node_data["code"] = (
+                f"import os\nos.environ['AUTORESEARCH_SEED'] = '{seed}'\n"
                 f"# Set random seed\nimport random\nimport numpy as np\nimport torch\n\nseed = {seed}\nrandom.seed(seed)\nnp.random.seed(seed)\ntorch.manual_seed(seed)\nif torch.cuda.is_available():\n    torch.cuda.manual_seed(seed)\n\n"
                 + node_code
             )
@@ -1325,10 +1466,15 @@ class ParallelAgent:
                 print(f"Sanity check: actual parent node id: {node.id}")
                 # Add node to journal's list and assign its step number
                 self.journal.append(result_node)
+                if self.cfg.agent.smoke_test and (
+                    result_node.is_buggy or result_node.is_buggy_plots
+                ):
+                    raise RuntimeError(f"Smoke seed evaluation failed: {result_node.analysis}")
                 seed_nodes.append(self.journal.get_node_by_id(result_node.id))
                 print("Added result node to journal")
             except Exception as e:
                 logger.error(f"Error in multi-seed evaluation: {str(e)}")
+                raise
 
         return seed_nodes
 
@@ -1432,12 +1578,13 @@ class ParallelAgent:
         from copy import deepcopy
         import os
         import multiprocessing
+        import uuid
 
         print("Starting _process_node_wrapper")
 
         # Create process-specific workspace
         process_id = multiprocessing.current_process().name
-        workspace = os.path.join(cfg.workspace_dir, f"process_{process_id}")
+        workspace = os.path.join(cfg.workspace_dir, f"process_{process_id}_{uuid.uuid4().hex[:12]}")
         os.makedirs(workspace, exist_ok=True)
         print(f"Process {process_id} using workspace: {workspace}")
         # Create process-specific working directory
@@ -1463,6 +1610,14 @@ class ParallelAgent:
         # Create interpreter instance for worker process
         print("Creating Interpreter")
         process_interpreter = make_interpreter(cfg, workspace)
+        post_interpreter = process_interpreter
+        if cfg.exec.local_postprocessing:
+            from .interpreter import Interpreter
+            post_interpreter = Interpreter(
+                working_dir=workspace, timeout=cfg.exec.timeout,
+                agent_file_name="postprocess.py",
+                format_tb_ipython=cfg.exec.format_tb_ipython,
+            )
 
         try:
             print(f"stage_name: {stage_name}")
@@ -1524,6 +1679,17 @@ class ParallelAgent:
             print("Running code")
             exec_result = process_interpreter.run(child_node.code, True)
             process_interpreter.cleanup_session()
+            import json
+            Path(workspace, "execution_result.json").write_text(
+                json.dumps(asdict(exec_result), indent=2)
+            )
+            Path(workspace, "experiment_code.py").write_text(child_node.code)
+
+            if cfg.agent.smoke_test:
+                print("Running deterministic smoke validation")
+                return _finish_smoke_node(
+                    child_node, exec_result, working_dir, workspace, cfg
+                )
 
             print("Parsing execution results")
             worker_agent.parse_exec_result(
@@ -1560,6 +1726,7 @@ class ParallelAgent:
                             "Original Code: " + child_node.code,
                         ],
                         "Instructions": [
+                            "This is CPU-only data analysis. Use numpy and the standard library, not torch or CUDA.",
                             "0. Make sure to get the working directory from os.path.join(os.getcwd(), 'working')",
                             "1. Load the experiment_data.npy file, which is located in the working directory",
                             "2. Extract metrics for each dataset. Make sure to refer to the original code to understand the structure of the data.",
@@ -1593,10 +1760,10 @@ class ParallelAgent:
                     child_node.parse_metrics_code = parse_metrics_code
                 try:
                     # Execute the parsing code
-                    metrics_exec_result = process_interpreter.run(
+                    metrics_exec_result = post_interpreter.run(
                         parse_metrics_code, True
                     )
-                    process_interpreter.cleanup_session()
+                    post_interpreter.cleanup_session()
                     child_node.parse_term_out = metrics_exec_result.term_out
                     child_node.parse_exc_type = metrics_exec_result.exc_type
                     child_node.parse_exc_info = metrics_exec_result.exc_info
@@ -1691,8 +1858,8 @@ class ParallelAgent:
                             plotting_code = worker_agent._generate_plotting_code(
                                 child_node, working_dir, plot_code_from_prev_stage
                             )
-                        plot_exec_result = process_interpreter.run(plotting_code, True)
-                        process_interpreter.cleanup_session()
+                        plot_exec_result = post_interpreter.run(plotting_code, True)
+                        post_interpreter.cleanup_session()
                         child_node.plot_exec_result = plot_exec_result
                         if child_node.plot_exc_type and retry_count < 3:
                             print(
@@ -1793,6 +1960,10 @@ class ParallelAgent:
 
             traceback.print_exc()
             raise
+        finally:
+            post_interpreter.cleanup_session()
+            if post_interpreter is not process_interpreter:
+                process_interpreter.cleanup_session()
 
     def _generate_hyperparam_tuning_idea(self) -> Optional[HyperparamTuningIdea]:
         """Generate the next hyperparam tuning idea based on what's been done.
@@ -2169,8 +2340,11 @@ class ParallelAgent:
                 print("Added result node to journal")
 
             except TimeoutError:
-                print("Worker process timed out, couldn't get the result")
-                logger.error(f"Worker process timed out, couldn't get the result")
+                future.cancel()
+                raise TimeoutError(
+                    f"Node exceeded agent.worker_timeout={self.timeout}s; "
+                    "stopping instead of queuing uncounted retries. Partial workspace retained."
+                )
             except Exception as e:
                 print(f"Error processing node: {str(e)}")
                 logger.error(f"Error processing node: {str(e)}")
@@ -2341,13 +2515,11 @@ class ParallelAgent:
                         self.gpu_manager.release_gpu(process_id)
 
                 # Shutdown executor first
+                processes = list((self.executor._processes or {}).values())
                 self.executor.shutdown(wait=False, cancel_futures=True)
 
                 # Force terminate all worker processes
-                if self.executor._processes:
-                    ## Get copy of processes
-                    processes = list(self.executor._processes.values())
-
+                if processes:
                     # Then terminate processes if they're still alive
                     for process in processes:
                         if process.is_alive():

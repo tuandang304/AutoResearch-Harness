@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import patch, Mock
 
 import yaml
 
@@ -14,6 +14,104 @@ from launch_scientist_bfts import main, find_pdf_path_for_review
 
 
 class PipelineTests(unittest.TestCase):
+    def test_worker_timeout_fails_instead_of_silently_retrying(self):
+        from ai_scientist.treesearch.parallel_agent import ParallelAgent
+        from omegaconf import OmegaConf
+        agent = ParallelAgent.__new__(ParallelAgent)
+        agent.cfg = OmegaConf.create({"agent": {"summary": None}})
+        agent._select_parallel_nodes = Mock(return_value=[None])
+        agent.journal = Mock()
+        agent.gpu_manager = None
+        agent.stage_name = "1_initial_implementation_1_preliminary"
+        agent.best_stage1_node = agent.best_stage2_node = agent.best_stage3_node = None
+        agent.task_desc = "test"
+        agent.evaluation_metrics = "test"
+        agent.timeout = 1
+        agent.executor = Mock()
+        future = agent.executor.submit.return_value
+        future.result.side_effect = TimeoutError()
+        with self.assertRaisesRegex(TimeoutError, "uncounted retries"):
+            agent.step(None)
+        future.cancel.assert_called_once()
+        agent.executor.submit.assert_called_once()
+
+    def test_shutdown_retains_process_handles(self):
+        from ai_scientist.treesearch.parallel_agent import ParallelAgent
+        agent = ParallelAgent.__new__(ParallelAgent)
+        agent._is_shutdown = False
+        agent.gpu_manager = None
+        agent.executor = Mock()
+        process = Mock()
+        agent.executor._processes = {1: process}
+        agent.executor.shutdown.side_effect = lambda **kw: setattr(agent.executor, "_processes", None)
+        agent.cleanup()
+        process.terminate.assert_called_once()
+
+    def test_deterministic_smoke_validation_retains_artifacts(self):
+        from ai_scientist.treesearch.interpreter import ExecutionResult
+        from ai_scientist.treesearch.journal import Node
+        from ai_scientist.treesearch.parallel_agent import _finish_smoke_node
+        from types import SimpleNamespace
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            workspace = root / "workspaces" / "0-run" / "worker"
+            working = workspace / "working"
+            working.mkdir(parents=True)
+            np = __import__("numpy")
+            np.save(working / "experiment_data.npy", {"loss": np.array([1.0])})
+            (working / "plot.png").write_bytes(b"png")
+            (workspace / "experiment_code.py").write_text("print('ok')")
+            (workspace / "execution_result.json").write_text("{}")
+            cfg = SimpleNamespace(workspace_dir=root / "workspaces" / "0-run")
+            node = Node(code="print('ok')", plan="smoke")
+            result = _finish_smoke_node(
+                node, ExecutionResult(["ok"], 0.1, None), working, workspace, cfg
+            )
+            self.assertFalse(result["is_buggy"])
+            saved = root / "workspaces" / "logs" / "0-run" / "experiment_results"
+            self.assertTrue(list(saved.rglob("experiment_data.npy")))
+
+    def test_smoke_validation_normalizes_torch_version_without_torch(self):
+        import sys
+        import types
+        import numpy as np
+        from ai_scientist.treesearch.interpreter import ExecutionResult
+        from ai_scientist.treesearch.journal import Node
+        from ai_scientist.treesearch.parallel_agent import _finish_smoke_node
+        from types import SimpleNamespace
+
+        torch_stub = types.ModuleType("torch")
+        version_stub = types.ModuleType("torch.torch_version")
+        TorchVersion = type("TorchVersion", (str,), {"__module__": "torch.torch_version"})
+        version_stub.TorchVersion = TorchVersion
+        torch_stub.torch_version = version_stub
+        previous = {name: sys.modules.get(name) for name in ("torch", "torch.torch_version")}
+        sys.modules["torch"], sys.modules["torch.torch_version"] = torch_stub, version_stub
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                workspace = root / "workspaces" / "0-run" / "worker"
+                working = workspace / "working"
+                working.mkdir(parents=True)
+                np.save(working / "experiment_data.npy", {"torch": TorchVersion("2.0")})
+                (working / "plot.png").write_bytes(b"png")
+                (workspace / "execution_result.json").write_text("{}")
+                result = _finish_smoke_node(
+                    Node(code="x", plan="x"), ExecutionResult([], 0.1, None),
+                    working, workspace, SimpleNamespace(workspace_dir=root / "workspaces" / "0-run")
+                )
+                self.assertFalse(result["is_buggy"])
+                del sys.modules["torch"], sys.modules["torch.torch_version"]
+                loaded = np.load(working / "experiment_data.npy", allow_pickle=True).item()
+                self.assertIs(type(loaded["torch"]), str)
+        finally:
+            for name, module in previous.items():
+                if module is None:
+                    sys.modules.pop(name, None)
+                else:
+                    sys.modules[name] = module
+
     def test_smoke_configuration_and_stage_limit(self):
         from types import SimpleNamespace
         from ai_scientist.treesearch.agent_manager import AgentManager
