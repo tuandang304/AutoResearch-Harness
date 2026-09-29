@@ -1,6 +1,7 @@
 import argparse
 import json
 import os
+from autoresearch.llm_router import RouterUnavailable
 import re
 import shutil
 import subprocess
@@ -170,6 +171,8 @@ def aggregate_plots(
             print_debug=False,
             msg_history=msg_history,
         )
+    except RouterUnavailable:
+        raise
     except Exception:
         traceback.print_exc()
         print("Failed to get aggregator script from LLM.")
@@ -227,6 +230,8 @@ If you believe you are done, simply say: "I am done". Otherwise, please provide 
                 msg_history=msg_history,
             )
 
+        except RouterUnavailable:
+            raise
         except Exception:
             traceback.print_exc()
             print("Failed to get reflection from LLM.")

@@ -1,6 +1,7 @@
 import argparse
 import json
 import os
+from autoresearch.llm_router import RouterUnavailable
 import os.path as osp
 import re
 import shutil
@@ -259,6 +260,8 @@ This JSON will be automatically parsed, so ensure the format is precise."""
         assert json_output is not None, "Failed to extract JSON from LLM output"
         query = json_output["Query"]
         papers = search_for_papers(query)
+    except RouterUnavailable:
+        raise
     except Exception:
         print("EXCEPTION in get_citation_addition (initial search):")
         print(traceback.format_exc())
@@ -329,6 +332,8 @@ This JSON will be automatically parsed, so ensure the format is precise."""
         else:
             return None, False
 
+    except RouterUnavailable:
+        raise
     except Exception:
         print("EXCEPTION in get_citation_addition (selecting papers):")
         print(traceback.format_exc())
@@ -582,6 +587,8 @@ def perform_writeup(
                             )
                             with open(writeup_file, "w") as fo:
                                 fo.write(revised)
+            except RouterUnavailable:
+                raise
             except Exception:
                 print("EXCEPTION in perform_writeup (citation round):")
                 print(traceback.format_exc())
@@ -613,6 +620,8 @@ def perform_writeup(
                 desc_text = desc_map.get(fname, "No description found")
                 plot_descriptions_list.append(f"{fname}: {desc_text}")
             plot_descriptions_str = "\n".join(plot_descriptions_list)
+        except RouterUnavailable:
+            raise
         except Exception:
             print("EXCEPTION in VLM figure description generation:")
             print(traceback.format_exc())
@@ -754,6 +763,8 @@ If you believe you are done, simply say: "I am done".
 
         return osp.exists(base_pdf_file + f"_{compile_attempt-1}.pdf")
 
+    except RouterUnavailable:
+        raise
     except Exception:
         print("EXCEPTION in perform_writeup:")
         print(traceback.format_exc())

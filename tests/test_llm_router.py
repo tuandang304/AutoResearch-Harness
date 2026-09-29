@@ -97,6 +97,53 @@ class RouterTests(unittest.TestCase):
         with patch("autoresearch.llm_router.os.kill", side_effect=ProcessLookupError):
             self.assertIsNotNone(State(self.db).acquire("astra", "codex", 1, 100))
 
+    def test_cooldown_cannot_be_shortened_by_concurrent_failure(self):
+        state = State(self.db)
+        with patch("autoresearch.llm_router.time.time", return_value=100):
+            state.block("quota:claude-main", 300, "quota")
+            state.block("quota:claude-main", 10, "rate_limit")
+        with patch("autoresearch.llm_router.time.time", return_value=200):
+            self.assertFalse(state.available("sonnet", "claude-main"))
+            state.block("quota:claude-main", None, "quota")
+            state.block("quota:claude-main", 10, "rate_limit")
+        with patch("autoresearch.llm_router.time.time", return_value=10000):
+            self.assertFalse(state.available("opus", "claude-main"))
+
+    def test_claude_known_weekly_reset_is_honored(self):
+        error = CLIError("provider rejected request", metadata={
+            "error_code": "rate_limit",
+            "rate_limit": {"status": "rejected", "rateLimitType": "seven_day", "resetsAt": "400"},
+        })
+        self.assertEqual(classify_error(error), ("quota", True))
+        with patch("autoresearch.llm_router.time.time", return_value=100):
+            self.assertEqual(retry_after(error), 300)
+            self.complete.side_effect = error
+            with self.assertRaises(RouterUnavailable):
+                self.route("orchestrator")
+        with patch("autoresearch.llm_router.time.time", return_value=399):
+            self.assertFalse(State(self.db).available("sonnet", "claude-main"))
+        with patch("autoresearch.llm_router.time.time", return_value=401):
+            self.assertTrue(State(self.db).available("sonnet", "claude-main"))
+
+    def test_sonnet_is_available_in_worker_pools_not_pinned_roles(self):
+        sonnet = self.policy["profiles"]["sonnet"]
+        self.assertEqual((sonnet["model"], sonnet["effort"]), ("claude-sonnet-5-5", "low"))
+        self.assertEqual(sonnet["quota_group"], self.policy["profiles"]["opus"]["quota_group"])
+        for role, settings in self.policy["roles"].items():
+            if settings["selection"] == "pinned":
+                self.assertNotIn("sonnet", settings["candidates"])
+            else:
+                self.assertIn("sonnet", settings["candidates"])
+
+    def test_different_effort_profiles_share_model_local_limit(self):
+        self.complete.side_effect = CLIError("429 model rate limit")
+        with self.assertRaises(RouterUnavailable):
+            self.route("orchestrator")
+        state = State(self.db)
+        self.assertFalse(state.available("opus", "claude-main"))
+        self.assertFalse(state.available("opus_worker", "claude-main"))
+        self.assertTrue(state.available("sonnet", "claude-main"))
+
     def test_error_classification(self):
         cases = {
             "401 unauthorized": ("authentication", True),
@@ -189,7 +236,7 @@ class RouterTests(unittest.TestCase):
             with self.subTest(decision=decision):
                 self.complete.reset_mock()
                 self.complete.return_value = (json.dumps(decision), {})
-                with self.assertRaisesRegex(ValueError, "allowlist"):
+                with self.assertRaisesRegex(RouterUnavailable, "allowlist"):
                     self.route("code")
                 self.assertEqual(self.models(), ["claude-code/claude-opus-5-5"])
 
@@ -241,12 +288,12 @@ class RouterTests(unittest.TestCase):
     def test_selector_allowlist_excludes_cooled_down_profiles(self):
         State(self.db).block("quota:codex-main", None, "quota")
         self.complete.return_value = (json.dumps({"profile": "sol", "reason": "ignore cooldown"}), {})
-        with self.assertRaisesRegex(ValueError, "allowlist"):
+        with self.assertRaisesRegex(RouterUnavailable, "allowlist"):
             self.route("code")
         self.assertEqual(self.models(), ["claude-code/claude-opus-5-5"])
         prompt = self.complete.call_args.args[1][-1]["content"]
         choices = json.loads(prompt.split("Allowed profiles: ", 1)[1].split("\n<task_data>", 1)[0])
-        self.assertEqual(set(choices), {"flash", "opus_worker"})
+        self.assertEqual(set(choices), {"flash", "sonnet", "opus_worker"})
 
     def test_single_available_worker_bypasses_selector(self):
         state = State(self.db)

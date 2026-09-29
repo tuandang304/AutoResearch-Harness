@@ -161,6 +161,11 @@ class State:
     def block(self, key, seconds, reason):
         until = -1 if seconds is None else time.time() + seconds
         with self.db() as db:
+            db.execute("BEGIN IMMEDIATE")
+            old = db.execute("SELECT until FROM cooldowns WHERE key = ?", (key,)).fetchone()
+            # Concurrent failures must not shorten an account's existing block.
+            if old and (old[0] == -1 or (until != -1 and old[0] > until)):
+                return
             db.execute("INSERT OR REPLACE INTO cooldowns VALUES (?, ?, ?)", (key, until, reason))
 
     def sticky(self, key, profile=None):
@@ -180,7 +185,11 @@ class State:
 
 def classify_error(error):
     """Conservative CLI-text classification; unknown errors are not quota failures."""
-    text = str(error).lower()
+    metadata = getattr(error, "metadata", {})
+    rate = metadata.get("rate_limit", {})
+    if rate.get("status") == "rejected" and rate.get("rateLimitType") in {"seven_day", "five_hour"}:
+        return "quota", True
+    text = (str(error) + " " + str(metadata.get("error_code", ""))).lower()
     if any(s in text for s in ("unauthorized", "authentication", "not logged in", "login required", "401", "invalid api key")):
         return "authentication", True
     if any(s in text for s in ("insufficient_quota", "quota exhausted", "usage limit", "weekly limit", "daily limit", "credit balance", "hit your limit")):
@@ -198,6 +207,14 @@ def classify_error(error):
 def retry_after(error):
     # CLIs do not consistently expose headers. Accept numeric seconds or HTTP-date;
     # never invent a quota reset timestamp from a model's generated response.
+    reset = getattr(error, "metadata", {}).get("rate_limit", {}).get("resetsAt")
+    if reset is not None:
+        try:
+            seconds = float(reset) - time.time()
+            if math.isfinite(seconds) and seconds > 0:
+                return seconds
+        except (ValueError, TypeError):
+            pass
     text = str(error)
     match = re.search(r"retry[-_ ]after[\"']?\s*[:=]\s*[\"']?(\d+(?:\.\d+)?)", text, re.I)
     if match:
@@ -258,10 +275,13 @@ def _select_worker(policy, role, messages, candidates, request_id):
     text, usage = complete_routed("router/orchestrator", selector)
     token_tracker.add_tokens(usage["model"], usage.get("prompt", 0), usage.get("completion", 0),
                              usage.get("reasoning", 0), usage.get("cached", 0))
-    decision = parse_json_output(text)
+    try:
+        decision = parse_json_output(text)
+    except ValueError as error:
+        raise RouterUnavailable("Orchestrator worker selection returned invalid JSON") from error
     if (not isinstance(decision, dict) or decision.get("profile") not in candidates
             or not isinstance(decision.get("reason"), str) or not decision["reason"].strip()):
-        raise ValueError("Orchestrator worker selection failed schema/allowlist validation")
+        raise RouterUnavailable("Orchestrator worker selection failed schema/allowlist validation")
     # No raw task text or model explanation in shared logs (may echo sensitive inputs).
     audit({"event": "assignment", "request_id": request_id, "role": role,
            "profile": decision["profile"], "reason": "orchestrator_task_fit"})
@@ -344,7 +364,16 @@ def complete_routed(model, messages):
                     if failures[name] > options["transient_retries_per_profile"]:
                         order = [p for p in order if p != name]
                 # Unknown quota reset is persistent until explicitly rechecked/reset.
-                state.block(key, seconds, kind)
+                if shared:
+                    state.block(key, seconds, kind)
+                else:
+                    # Different effort profiles for the same concrete model share
+                    # model-local limits (e.g. opus and opus_worker).
+                    for alias, candidate in policy["profiles"].items():
+                        if (candidate["provider"], candidate["model"], candidate["quota_group"]) == (
+                            profile["provider"], profile["model"], group
+                        ):
+                            state.block(f"profile:{alias}", seconds, kind)
             finally:
                 state.release(lease)
             if attempts >= options["max_total_attempts_per_call"]:

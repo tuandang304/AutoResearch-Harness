@@ -16,16 +16,13 @@ import time
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from ai_scientist import cli_llm
+from autoresearch.llm_router import load_policy
 
 
-PROFILES = [
-    ("claude-code/claude-opus-5-5", "medium"),
-    ("claude-code/claude-opus-5-5", "low"),
-    ("codex/gpt-6-astra", "low"),
-    ("codex/gpt-6-sol", "low"),
-    ("codex/gpt-6-luna", "low"),
-    ("antigravity/gemini-3.8-flash", "high"),
-]
+PROFILES = list(dict.fromkeys(
+    (f"{profile['provider']}/{profile['model']}", profile["effort"])
+    for profile in load_policy(Path(__file__).resolve().parents[1] / "configs/llm.yaml")["profiles"].values()
+))
 
 
 def error_category(error):
@@ -86,7 +83,8 @@ def probe(profile, image_url=None):
         ]))
     for kind, prompt in checks:
         start = time.monotonic()
-        record = {"model": model, "effort": effort, "check": kind}
+        record = {"model": model, "effort": effort, "check": kind,
+                  "tested_at": datetime.now(timezone.utc).isoformat()}
         for attempt in range(2):
             record["attempts"] = attempt + 1
             try:
@@ -133,6 +131,7 @@ def main():
     parser.add_argument("--vision", action="store_true", help="Include a generated shape/color image probe")
     parser.add_argument("--output", type=Path, help="Explicit path for sanitized JSON evidence")
     parser.add_argument("--provider", choices=cli_llm.CLI_PROVIDERS, help="Probe only this provider")
+    parser.add_argument("--model", choices=sorted({p[0] for p in PROFILES}), help="Probe only one exact provider/model ID")
     args = parser.parse_args()
     if not args.live:
         parser.error("Live verification requires --live (may incur provider usage).")
@@ -150,12 +149,16 @@ def main():
     cli_llm.CLI_STARTUP_TIMEOUT = 45
     logging.getLogger("ai-scientist").disabled = True
     image_url, asset = vision_asset() if args.vision else (None, None)
-    profiles = [p for p in PROFILES if not args.provider or p[0].split("/", 1)[0] == args.provider]
+    profiles = [p for p in PROFILES if (not args.provider or p[0].split("/", 1)[0] == args.provider)
+                and (not args.model or p[0] == args.model)]
+    if not profiles:
+        parser.error("Provider and model filters select no profiles")
     with ThreadPoolExecutor(max_workers=6) as pool:
         results = [record for records in pool.map(lambda p: probe(p, image_url), profiles) for record in records]
-    if args.provider and existing:
+    if (args.provider or args.model) and existing:
         # A targeted rerun replaces this provider only, retaining prior evidence.
-        retained = [r for r in existing.get("results", []) if r["model"].split("/", 1)[0] != args.provider]
+        tested = {p[0] for p in profiles}
+        retained = [r for r in existing.get("results", []) if r["model"] not in tested]
         results = results + retained
     payload = {
         "artifact_owner": owner,

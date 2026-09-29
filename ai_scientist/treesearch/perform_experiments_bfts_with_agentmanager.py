@@ -1,4 +1,5 @@
 import logging
+from autoresearch.llm_router import RouterUnavailable
 import json
 import pickle
 from . import backend
@@ -150,6 +151,8 @@ def perform_experiments_bfts(config_path: str):
             # Save the run as before
             save_run(cfg, journal, stage_name=f"stage_{stage.name}")
 
+        except RouterUnavailable:
+            raise
         except Exception as e:
             print(f"Error in step callback: {e}")
 

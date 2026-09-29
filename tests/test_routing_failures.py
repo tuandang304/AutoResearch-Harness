@@ -63,6 +63,38 @@ class RoutingFailureTests(unittest.TestCase):
         with patch("ai_scientist.treesearch.agent_manager.query", side_effect=ValueError("bad response")):
             self.assertEqual(manager._get_response("test")["name"], "fallback_stage")
 
+    def test_citation_helpers_do_not_hide_routing_exhaustion(self):
+        from ai_scientist import perform_writeup, perform_icbinb_writeup
+        for module in (perform_writeup, perform_icbinb_writeup):
+            with self.subTest(module=module.__name__), patch.object(
+                module, "get_response_from_llm", side_effect=self.failure
+            ) as request:
+                with self.assertRaises(RouterUnavailable):
+                    module.get_citation_addition(Mock(), "router/citation", ("results", ""), 0, 1, "idea")
+                request.assert_called_once()
+
+    def test_citation_collection_stops_without_uncounted_round_retries(self):
+        from ai_scientist import perform_icbinb_writeup as module
+        with tempfile.TemporaryDirectory() as directory, patch.object(module, "load_idea_text", return_value="idea"), \
+                patch.object(module, "load_exp_summaries", return_value={}), \
+                patch.object(module, "filter_experiment_summaries", return_value={}), \
+                patch.object(module, "create_client", return_value=(Mock(), "router/citation")), \
+                patch.object(module, "get_citation_addition", side_effect=self.failure) as request:
+            with self.assertRaises(RouterUnavailable):
+                module.gather_citations(directory, num_cite_rounds=3)
+            request.assert_called_once()
+
+    def test_aggregation_does_not_return_success_when_model_unavailable(self):
+        from ai_scientist import perform_plotting as module
+        with tempfile.TemporaryDirectory() as directory, patch.object(module, "load_idea_text", return_value="idea"), \
+                patch.object(module, "load_exp_summaries", return_value={}), \
+                patch.object(module, "filter_experiment_summaries", return_value={}), \
+                patch.object(module, "create_client", return_value=(Mock(), "router/plotting")), \
+                patch.object(module, "get_response_from_llm", side_effect=self.failure) as request:
+            with self.assertRaises(RouterUnavailable):
+                module.aggregate_plots(directory, model="router/plotting")
+            request.assert_called_once()
+
     def test_plot_selection_and_seed_aggregation_propagate(self):
         worker = MinimalAgent("test", self.cfg)
         node = Node(code="pass", plan="test")

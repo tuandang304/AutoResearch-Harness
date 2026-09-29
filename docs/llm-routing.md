@@ -32,12 +32,17 @@ performance at the selected effort or with this completion-only CLI interface.
 |---|---|---|---|
 | opus | claude-opus-5-5 | medium | Orchestration, manuscript decisions and final review |
 | opus_worker | claude-opus-5-5 | low | Last-resort bounded worker |
+| sonnet | claude-sonnet-5-5 | low | Scoped fixes and iterative editing; shared Claude quota |
 | astra | gpt-6-astra | low | Integration and difficult debugging |
 | sol | gpt-6-sol | low | Routine implementation and writing |
 | luna | gpt-6-luna | low | Extraction, small edits, summaries |
 | flash | gemini-3.8-flash | high | Numerical/visual analysis and multi-step work |
 
 Research checked 2026-09-29:
+
+- [Anthropic Sonnet 5.5 introduction](https://www.anthropic.com/claude-sonnet-5-5)
+  positions Sonnet for bounded everyday work, bug fixes and iterative deliverables.
+  We use low effort for its worker role, subject to task-level evaluation.
 
 - [OpenAI model selection](https://developers.openai.com/api/docs/guides/model-selection)
   distinguishes efficient scoped work, general-purpose judgment, and broader
@@ -50,7 +55,7 @@ Research checked 2026-09-29:
 
 Exact IDs are explicit; `opus`, `default`, and display-name guesses are not used
 in profiles. All GPT profiles conservatively share `codex-main`, and both Opus
-profiles share `claude-main`. These groupings are local account assumptions,
+profiles and Sonnet share `claude-main`. These groupings are local account assumptions,
 not a claim about every provider's limit structure. Adjust only after confirming
 which credentials and limits are independent.
 
@@ -87,7 +92,10 @@ therefore cannot be directly transferred to this harness.
 - Output-format repairs remain bounded in the caller. They are not quota events.
 - SQLite leases cap concurrency per group across local processes. Expired/dead
   process leases can be reclaimed. This is not a distributed multi-host scheduler.
-- Opus workers are ordered last to reduce competition with orchestration. This
+- Claude workers (Sonnet before Opus) are ordered after independent providers to
+  reduce competition with orchestration when `reserve_orchestrator_capacity` is
+  true. This safety preference takes precedence over a selector's recommendation.
+  Disable it only if you accept shared-quota contention. This
   is not a guaranteed token reservation: the CLI exposes no reliable remaining
   quota budget, and an already-running worker cannot be preempted safely.
 
@@ -126,7 +134,9 @@ unreported provider usage. Token counts are not subscription billing records.
 
 ```bash
 # Explicit live tests: provider usage is incurred; no automatic model fallback.
-python scripts/verify_llm_profiles.py --live
+python scripts/verify_llm_profiles.py --live --vision --output .state/model-verification.json
+# Add/retest one model without repeating the entire pool:
+python scripts/verify_llm_profiles.py --live --vision --model claude-code/claude-sonnet-5-5 --output .state/model-verification.json
 # Offline tests never authenticate or call providers.
 python -m unittest discover -s tests -v
 ```
@@ -135,3 +145,22 @@ Text/JSON/image probes test access and interface correctness only. They do not
 measure scientific reasoning quality, model ranking, or full-pipeline completion.
 Preserve the sanitized results with the exact CLI versions and test date when
 using the harness in a paper. Repeat after CLI/account/model changes.
+
+### Local verification on 2026-09-29
+
+Installed clients checked: Claude Code 2.1.284, Codex CLI 0.158.0,
+Antigravity CLI snap 1.2.11 (revision 23).
+
+All seven configured model/effort profiles passed text, JSON and simple image
+checks (21 checks): Opus medium/low, Sonnet low, Astra/Sol/Luna low, Flash high.
+Opus initially reported a weekly quota rejection; after the indicated 13:00
+Asia/Ho_Chi_Minh reset, a targeted rerun passed. Claude responses exposed matching
+model metadata. Codex and Antigravity accepted the exact requested IDs but did
+not expose serving-model metadata in these probes.
+
+A separate routed call passed: Opus selected Luna for a bounded extraction,
+the worker returned the expected JSON, and both models were attributed separately.
+This is interface verification, not a full research run or a quality benchmark.
+Sanitized local evidence is in `.state/model-verification.json`; run-specific
+routing evidence is under `.state/routing-check-*/`. These artifacts are ignored
+by Git and are not credentials.

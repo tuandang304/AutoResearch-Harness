@@ -68,7 +68,7 @@ selects projects/regularization. Always select your study for real research.
 ## Models
 
 Default orchestrator: **Claude Opus 5.5, medium effort**. Worker pool:
-**GPT-6-Sol, GPT-6-Luna, GPT-6-Astra and Opus 5.5 at low effort**, plus
+**GPT-6-Sol, GPT-6-Luna, GPT-6-Astra, Sonnet 5.5 and Opus 5.5 at low effort**, plus
 **Gemini 3.8 Flash at high effort**. Exact IDs, task instructions and quota groups
 live in [configs/llm.yaml](configs/llm.yaml).
 

@@ -1,6 +1,7 @@
 import argparse
 import json
 import os
+from autoresearch.llm_router import RouterUnavailable
 import os.path as osp
 import re
 import shutil
@@ -448,6 +449,8 @@ This JSON will be automatically parsed, so ensure the format is precise."""
         assert json_output is not None, "Failed to extract JSON from LLM output"
         query = json_output["Query"]
         papers = search_for_papers(query, result_limit=5)
+    except RouterUnavailable:
+        raise
     except Exception:
         print("EXCEPTION in get_citation_addition (initial search):")
         print(traceback.format_exc())
@@ -518,6 +521,8 @@ This JSON will be automatically parsed, so ensure the format is precise."""
         else:
             return None, False
 
+    except RouterUnavailable:
+        raise
     except Exception:
         print("EXCEPTION in get_citation_addition (selecting papers):")
         print(traceback.format_exc())
@@ -836,6 +841,8 @@ def gather_citations(base_folder, num_cite_rounds=20, small_model="gpt-4o-2024-0
                                     f,
                                 )
 
+            except RouterUnavailable:
+                raise
             except Exception as e:
                 print(f"Error in citation round {round_idx}: {e}")
                 print(traceback.format_exc())
@@ -848,6 +855,8 @@ def gather_citations(base_folder, num_cite_rounds=20, small_model="gpt-4o-2024-0
 
         return citations_text if citations_text else None
 
+    except RouterUnavailable:
+        raise
     except Exception:
         print("EXCEPTION in gather_citations:")
         print(traceback.format_exc())
@@ -973,6 +982,8 @@ def perform_writeup(
                 desc_text = desc_map.get(fname, "No description found")
                 plot_descriptions_list.append(f"{fname}: {desc_text}")
             plot_descriptions_str = "\n".join(plot_descriptions_list)
+        except RouterUnavailable:
+            raise
         except Exception:
             print("EXCEPTION in VLM figure description generation:")
             print(traceback.format_exc())
@@ -1236,6 +1247,8 @@ USE MINIMAL EDITS TO OPTIMIZE THE PAGE LIMIT USAGE."""
 
         return osp.exists(reflection_pdf)
 
+    except RouterUnavailable:
+        raise
     except Exception:
         print("EXCEPTION in perform_writeup:")
         print(traceback.format_exc())

@@ -1,4 +1,5 @@
 import os
+from autoresearch.llm_router import RouterUnavailable
 import hashlib
 import pymupdf
 import re
@@ -436,10 +437,15 @@ def detect_duplicate_figures(client, client_model, pdf_path):
             max_tokens=1000,
         )
 
+        from ai_scientist.utils.token_tracker import record_response
+        record_response(response, model=client_model)
+
         analysis = response.choices[0].message.content
 
         return analysis
 
+    except RouterUnavailable:
+        raise
     except Exception as e:
         print(f"Error analyzing images: {e}")
         return {"error": str(e)}

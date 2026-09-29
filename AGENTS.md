@@ -19,7 +19,8 @@ Keep ai_scientist imports and AI_SCIENTIST_* compatibility settings intact.
 ## Models and execution
 
 Read docs/llm-routing.md. configs/llm.yaml pins claude-opus-5-5 medium as
-orchestrator. Workers: gpt-6-sol, gpt-6-luna, gpt-6-astra, claude-opus-5-5 low;
+orchestrator. Workers: gpt-6-sol, gpt-6-luna, gpt-6-astra, claude-sonnet-5-5,
+claude-opus-5-5 low;
 gemini-3.8-flash high. Opus workers are last-resort, sharing orchestrator quota.
 Do not silently substitute IDs or effort. Policy binds before provider/model overrides.
 autoresearch/llm_router.py owns assignment, shared cooldowns and per-call provenance.

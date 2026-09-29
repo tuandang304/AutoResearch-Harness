@@ -44,6 +44,7 @@ CLI_PROVIDERS = ("claude-code", "codex", "antigravity")
 # Suggested model names per provider; any "<provider>/<name>" string is accepted.
 CLI_MODELS = [
     "claude-code/claude-opus-5-5",
+    "claude-code/claude-sonnet-5-5",
     "codex/gpt-6-astra",
     "codex/gpt-6-sol",
     "codex/gpt-6-luna",
