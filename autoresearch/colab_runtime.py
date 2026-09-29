@@ -17,9 +17,12 @@ Compute is spent only while it is needed:
 * a detached watchdog stops each VM after its idle limit, stops all of them at
   the run's compute-unit budget, and when the controller process disappears;
 * ``max_sessions`` bounds concurrent VMs; an idle one is stopped to make room;
+* a tier whose VMs are all overloaded (no free slot, or GPU memory >= 85%) gets
+  another replica, up to ``max_replicas`` and within a budget reserve;
 * an unavailable tier falls back to a pricier one only within max_upgrade_ratio,
   otherwise to cheaper GPU tiers;
-* a CUDA out-of-memory failure is re-run once on the next larger tier.
+* a CUDA out-of-memory failure is re-run once: alone on the same tier when the
+  VM was shared, otherwise on the next larger tier.
 
 The CLI records every executed cell and its output in its local history, so the
 executor token is uploaded as a file and never appears in code or output.
@@ -30,6 +33,7 @@ executor token is uploaded as a file and never appears in code or output.
 """
 
 import argparse
+from collections import namedtuple
 import contextlib
 import fcntl
 import json
@@ -84,6 +88,7 @@ DEFAULTS = {
     "gpu": "T4",
     "tiers": DEFAULT_TIERS,
     "max_sessions": 2,
+    "max_replicas": 2,
     "max_upgrade_ratio": 1.5,
     "escalate_on_oom": True,
     "high_mem": False,
@@ -102,6 +107,8 @@ USAGE_SECONDS = 300
 ROOM_WAIT_SECONDS = 1800
 UNAVAILABLE_SECONDS = 1800  # entitlement/quota refusals
 TRANSIENT_SECONDS = 180  # capacity refusals (HTTP 5xx), which usually clear quickly
+OVERLOAD_MEMORY = 0.85  # a VM whose GPU memory is this full cannot take another job
+SCALE_OUT_RESERVE_HOURS = 0.5  # a new replica needs this much budget at its tier's rate
 _SECRET = re.compile(r"(token=)[^\s&'\"]+", re.I)
 _ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
 _BOX = re.compile(r"[\u2500-\u257f]+")
@@ -114,12 +121,46 @@ STATE_ENV = "AUTORESEARCH_COLAB_STATE"
 COMPUTE_LOG_ENV = "AUTORESEARCH_COMPUTE_LOG"
 
 
+# shared: the VM already had running/queued jobs when this one was placed.
+Placement = namedtuple("Placement", "tier key path notes shared")
+
+
 class TierUnavailable(RemoteExecutorUnavailable):
     """One tier could not be allocated; cheaper tiers may still work."""
 
 
 class NoTierAvailable(RemoteExecutorUnavailable):
     """No candidate tier could be allocated right now; retrying later may work."""
+
+
+def _tier_of(key):
+    """Replica keys are the tier name, then T4.2, T4.3, ... for scale-out VMs."""
+    return key.split(".")[0]
+
+
+def _replica_index(key):
+    return int(key.split(".")[1]) if "." in key else 1
+
+
+def gpu_memory_fraction(health):
+    """Used/total GPU memory from the executor's nvidia-smi line, if reported."""
+    match = re.search(r"(\d+)\s*MiB\s*,\s*(\d+)\s*MiB", str(health.get("gpu", "")))
+    if not match or not int(match.group(2)):
+        return None
+    return int(match.group(1)) / int(match.group(2))
+
+
+def overloaded(health):
+    """No free job slot, or GPU memory too full for another concurrent job."""
+    busy = health.get("running", 0) + health.get("queued", 0)
+    if busy >= max(1, health.get("max_concurrent", 1)):
+        return True
+    fraction = gpu_memory_fraction(health)
+    return bool(health.get("running") and fraction is not None and fraction >= OVERLOAD_MEMORY)
+
+
+def _load(health):
+    return (health.get("running", 0) + health.get("queued", 0)) / max(1, health.get("max_concurrent", 1))
 
 
 def _tier_name(value):
@@ -182,7 +223,7 @@ def validate_colab_settings(settings):
     number("max_upgrade_ratio", merged["max_upgrade_ratio"], positive=True)
     if merged["max_upgrade_ratio"] < 1:
         raise ValueError("exec.colab.max_upgrade_ratio must be at least 1 (1 = never pay more)")
-    for key in ("max_concurrent", "max_sessions"):
+    for key in ("max_concurrent", "max_sessions", "max_replicas"):
         value = merged[key]
         if (value is not None or key == "max_sessions") and (
                 isinstance(value, bool) or not isinstance(value, int) or value < 1):
@@ -273,6 +314,11 @@ def compute_instructions():
     if cap is not None:
         remaining = max(0.0, cap - state.get("spent_units", 0.0))
         lines.append(f"Remaining run budget: {remaining:.1f} of {cap:g} compute units.")
+    if settings["max_replicas"] > 1:
+        lines.append(
+            "If the chosen tier's VM is busy with other jobs, the harness may start another VM of "
+            f"the same tier (up to {settings['max_replicas']}); do not pick a larger tier just "
+            "to avoid waiting.")
     lines.append(f"Without a COMPUTE line the script runs on {settings['gpu'][0]}.")
     return {"Compute selection": lines}
 
@@ -535,12 +581,15 @@ class ColabPool:
             yield state
             self.save(state)
 
-    def _entry(self, state, tier):
-        entry = state["sessions"].setdefault(tier, {})
+    def _entry(self, state, key):
+        entry = state["sessions"].setdefault(key, {})
         if not entry:
+            tier, index = _tier_of(key), _replica_index(key)
             fixed = state["settings"]["selection"] == "fixed"
             name = state["pool"] if fixed else f"{state['pool']}-{tier.lower()}"
+            name += f"-{index}" if index > 1 else ""
             entry.update(
+                tier=tier,
                 session=name,
                 executor_path=state["executor_override"]
                 or str(self.state_path.parent / f"{name}.executor.json"),
@@ -595,19 +644,74 @@ class ColabPool:
                 f"is spent (pool {state['pool']})"
             )
 
-    def acquire(self, requested=None):
-        """Return (tier, executor_path, fallback notes) for a job requesting a tier."""
+    def acquire(self, requested=None, exclusive=False):
+        """Place a job on a tier (see candidates) and replica; returns a Placement.
+
+        exclusive: only an idle replica will do (re-running an OOM caused by
+        sharing a GPU); a new replica is started when none is idle.
+        """
         state = self.load()
         self._check_pool(state)
         notes = []
         for tier in candidates(state["settings"], requested):
             try:
-                return tier, self.ensure(tier), notes
+                with self.locked(f"place-{tier}"):  # one scale-out decision at a time
+                    key, path, shared = self._place(tier, notes, exclusive)
+                return Placement(tier, key, path, notes, shared)
             except TierUnavailable as exc:
                 notes.append(str(exc))
         raise NoTierAvailable("No Colab tier could be allocated: " + "; ".join(notes))
 
-    def ensure(self, tier):
+    def _place(self, tier, notes, exclusive=False):
+        """Least-loaded healthy replica with room; else start another one if allowed."""
+        state = self.load()
+        keys = sorted((k for k, e in state["sessions"].items() if e.get("tier", k) == tier),
+                      key=_replica_index) or [tier]
+        up = {k: self.health(state["sessions"][k]) for k in keys
+              if state["sessions"].get(k, {}).get("up")}
+        if not up:
+            return keys[0], self.ensure(keys[0]), False
+        free = [k for k, h in up.items() if h and (_load(h) == 0 if exclusive else not overloaded(h))]
+        if free:
+            key = min(free, key=lambda k: _load(up[k]))
+            return key, self.ensure(key), _load(up[key]) > 0
+        unreachable = [k for k, h in up.items() if h is None]
+        if unreachable:  # reconnect before paying for another VM
+            return unreachable[0], self.ensure(unreachable[0]), False
+        blocker = self._scale_blocker(state, tier, len(up))
+        if blocker is None:
+            index = next(i for i in range(2, 1000) if f"{tier}.{i}" not in up)
+            key = f"{tier}.{index}"
+            try:
+                path = self.ensure(key, wait_for_room=False)
+                notes.append(f"every {tier} VM was {'in use' if exclusive else 'busy'}; "
+                             f"started {tier} replica {index}")
+                return key, path, False
+            except TierUnavailable as exc:
+                blocker = str(exc)
+        key = min(up, key=lambda k: _load(up[k]))
+        notes.append(f"every {tier} VM was busy; queued on {key} ({blocker})")
+        return key, self.ensure(key), True
+
+    def _scale_blocker(self, state, tier, replicas_up):
+        """Why another replica of this tier may not start, or None."""
+        settings = state["settings"]
+        if state["executor_override"]:
+            return "a standalone executor file serves one VM"
+        if replicas_up >= settings["max_replicas"]:
+            return f"max_replicas={settings['max_replicas']}"
+        others = [e for e in state["sessions"].values()
+                  if e.get("up") and e.get("tier") != tier]
+        if replicas_up + len(others) >= settings["max_sessions"] and all(
+                self._busy(e) for e in others):
+            return f"max_sessions={settings['max_sessions']} VMs are all busy"
+        cap = settings["max_compute_units"]
+        rate = settings["tiers"].get(tier, {}).get("rate", 0)
+        if cap is not None and cap - state.get("spent_units", 0.0) < rate * SCALE_OUT_RESERVE_HOURS:
+            return "remaining budget below the scale-out reserve"
+        return None
+
+    def ensure(self, tier, wait_for_room=True):
         """Make one tier's executor reachable; returns its executor file path."""
         with self.locked(f"tier-{tier}"):
             with self.mutate() as state:
@@ -620,15 +724,16 @@ class ColabPool:
             if self.cli.session_exists(entry["session"]):
                 self._bootstrap(tier, reuse_token=True)
             else:
-                self._make_room(tier)
+                self._make_room(tier, wait=wait_for_room)
                 self._provision(tier)
                 self._bootstrap(tier, reuse_token=False)
             with self.mutate() as state:
                 self._entry(state, tier).update(up=True, stop_reason=None, last_busy=time.time())
             return entry["executor_path"]
 
-    def _make_room(self, tier):
-        """Enforce max_sessions by stopping the priciest idle session, else wait."""
+    def _make_room(self, tier, wait=True):
+        """Enforce max_sessions by stopping the priciest idle session, else wait
+        (or, for an optional scale-out, give up at once)."""
         deadline = time.time() + ROOM_WAIT_SECONDS
         while True:
             state = self.load()
@@ -636,11 +741,14 @@ class ColabPool:
             if len(others) < state["settings"]["max_sessions"]:
                 return
             rates = state["settings"]["tiers"]
-            for victim in sorted(others, key=lambda t: -rates.get(t, {}).get("rate", 0)):
+            for victim in sorted(others, key=lambda t: -rates.get(_tier_of(t), {}).get("rate", 0)):
                 if not self._busy(others[victim]) and self.stop_tier(victim, "make-room",
                                                                     blocking=False):
                     break
             else:
+                if not wait:
+                    raise TierUnavailable(
+                        f"max_sessions={state['settings']['max_sessions']} VMs are all busy")
                 if time.time() >= deadline:
                     raise RemoteExecutorUnavailable(
                         f"exec.colab.max_sessions={state['settings']['max_sessions']} sessions "
@@ -648,9 +756,10 @@ class ColabPool:
                     )
                 time.sleep(15)
 
-    def _provision(self, tier):
+    def _provision(self, key):
+        tier = _tier_of(key)
         state = self.load()
-        settings, entry = state["settings"], self._entry(state, tier)
+        settings, entry = state["settings"], self._entry(state, key)
         balance, before = self._check_balance(settings)
         args = ["new", "-s", entry["session"]]
         if tier != "cpu":
@@ -667,7 +776,7 @@ class ColabPool:
                 time.sleep(20)
                 continue
             with self.mutate() as fresh:
-                self._entry(fresh, tier).update(
+                self._entry(fresh, key).update(
                     stop_reason="capacity" if transient else "allocation-failed",
                     unavailable_until=time.time()
                     + (TRANSIENT_SECONDS if transient else UNAVAILABLE_SECONDS))
@@ -678,7 +787,7 @@ class ColabPool:
             after = None
         with self.mutate() as fresh:
             fresh.setdefault("start_balance", balance)
-            current = self._entry(fresh, tier)
+            current = self._entry(fresh, key)
             current.update(provisions=current["provisions"] + 1, provisioned_at=time.time())
             if after is not None and after > before:
                 current["measured_rate"] = round(after - before, 3)
@@ -702,9 +811,10 @@ class ColabPool:
             f"Executor on {entry['session']} started but {note}; VM stopped. "
             f"Tunnel log: {redact(out)[-800:]}")
 
-    def _bootstrap_once(self, tier, reuse_token):
+    def _bootstrap_once(self, key, reuse_token):
+        tier = _tier_of(key)
         state = self.load()
-        entry = self._entry(state, tier)
+        entry = self._entry(state, key)
         name, executor_path = entry["session"], Path(entry["executor_path"])
         token = None
         if reuse_token:
@@ -729,18 +839,18 @@ class ColabPool:
         fields = dict(re.findall(r"^AISCI_(\w+)=(.*)$", out, re.M))
         if "URL" not in fields:
             # `colab exec` exits 0 on remote exceptions; the marker is authoritative.
-            self._halt(tier, "bootstrap-failed")
+            self._halt(key, "bootstrap-failed")
             raise RemoteExecutorUnavailable(
                 f"Executor bootstrap failed on {name}: {redact(err or out).strip()[-1200:]}"
             )
         gpu = fields.get("GPU", "none").strip()
         marker = GPU_NAME_MARKERS.get(tier)
         if (tier != "cpu" and gpu == "none") or (marker and marker not in gpu):
-            self._halt(tier, "wrong-gpu", unavailable=True)
+            self._halt(key, "wrong-gpu", unavailable=True)
             raise TierUnavailable(f"requested {tier} but Colab allocated {gpu!r}; session stopped")
         _write_private(executor_path, {"url": fields["URL"].strip(), "token": token})
         with self.mutate() as fresh:
-            self._entry(fresh, tier)["gpu"] = gpu
+            self._entry(fresh, key)["gpu"] = gpu
         return fields["URL"].strip()
 
     def _halt(self, tier, reason, unavailable=False):
@@ -797,7 +907,7 @@ class ColabPool:
                     last_busy = now
                     with self.mutate() as fresh:
                         self._entry(fresh, tier)["last_busy"] = now
-                idle = settings["tiers"].get(tier, {}).get("idle_stop_minutes")
+                idle = settings["tiers"].get(_tier_of(tier), {}).get("idle_stop_minutes")
                 idle = settings["idle_stop_minutes"] if idle is None else idle
                 if idle is not None and now - last_busy >= idle * 60:
                     self.stop_tier(tier, "idle", blocking=False)
@@ -841,9 +951,9 @@ class ColabPool:
             "start_balance": state.get("start_balance"),
             "balance": state.get("balance"),
             "sessions": {
-                tier: {key: entry.get(key) for key in (
-                    "session", "gpu", "provisions", "stop_reason", "measured_rate")}
-                for tier, entry in state["sessions"].items()
+                replica: {key: entry.get(key) for key in (
+                    "tier", "session", "gpu", "provisions", "stop_reason", "measured_rate")}
+                for replica, entry in state["sessions"].items()
             },
         }
 
@@ -942,8 +1052,8 @@ def main(argv=None):
                 settings, executor_path=args.executor_config or _config_path(),
                 max_concurrent=args.max_concurrent, session=args.session)
             pool.preflight()
-            tier, path, notes = pool.acquire()
-            entry = pool.load()["sessions"][tier]
+            tier, key, path, notes, _ = pool.acquire()
+            entry = pool.load()["sessions"][key]
             for note in notes:
                 print(f"Skipped: {note}")
             print(f"Session {entry['session']} on {tier} ({entry['gpu']})")

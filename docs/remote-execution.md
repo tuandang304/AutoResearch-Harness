@@ -107,6 +107,7 @@ exec:
       L4:   {rate: 1.71, memory_gb: 22, use: "mid-size models, bf16"}
       A100: {rate: 5.40, memory_gb: 40, idle_stop_minutes: 10, use: "large models"}
     max_sessions: 2
+    max_replicas: 2
     max_upgrade_ratio: 1.5
     escalate_on_oom: true
     idle_stop_minutes: 30
@@ -134,13 +135,38 @@ The declaration is a comment and changes nothing when run locally. Routing:
 | Seed evaluations | The parent's code, so the parent's declaration |
 | Tier refused by Colab | Pricier tiers within `max_upgrade_ratio` of its rate (T4 → L4 at 1.44×), then cheaper GPU tiers; never cpu for a GPU request |
 | No tier can be allocated | Retried every 60 s within `remote_wait_minutes`, then `NoTierAvailable` stops the run |
-| CUDA out of memory | Re-run once, from the same uploaded snapshot, on the next larger tier; a second OOM goes to the model as a normal failure |
+| Tier's VM overloaded | Least-loaded VM of the tier with room. If every one is overloaded, another VM of the same tier starts (see "Scale-out") |
+| CUDA out of memory | Re-run once from the same uploaded snapshot. If the VM was shared with other jobs, alone on the same tier (an idle or new VM); otherwise on the next larger tier. A second OOM goes to the model as a normal failure |
 
 Each job's output starts with a line such as
 `[compute] Requested L4 (reason); ran on L4 (NVIDIA L4, 23034 MiB) in 312s, ~0.148 compute units.`
 The feedback and debug prompts therefore see what the choice cost. Every job is
 also recorded in the run's `compute.jsonl`: declared tier, reason, tier used,
 GPU name, time, estimated units, escalation and fallback notes.
+
+### Scale-out
+
+The model chooses a tier; the harness may run that choice on more than one VM.
+A VM is overloaded when all of its job slots (`max_concurrent`, default
+`agent.num_workers`) are running or queued, or when its GPU memory is at least
+85% used while a job runs. When every VM of the requested tier is overloaded, the
+job goes to a new replica (`T4.2`, `T4.3`, ...). This happens only if all of the
+following hold:
+
+- fewer than `max_replicas` VMs of that tier are up;
+- `max_sessions` leaves room, or another tier's VM is idle and can be stopped;
+- the remaining budget covers at least 30 minutes at the tier's rate;
+- the executor is not a standalone `up` executor file.
+
+Otherwise the job waits on the least-loaded VM, and its `[compute]` line says
+why. Placement is serialized per tier across workers, so simultaneous jobs
+start at most one extra VM. Replicas scale in through the normal per-VM idle
+stop. `compute.jsonl` records the replica and whether the VM was shared.
+
+Memory is sampled at placement time. A job that has just started may not have
+allocated yet, so a concurrent placement can still meet contention; the shared-GPU
+OOM re-run covers that case. With `num_workers: 1` a VM never has a second job,
+and scale-out never triggers.
 
 The tier `rate` values order the menu and inform the model. After provisioning,
 the rate the account actually reports is stored as `measured_rate` and shown
@@ -158,7 +184,8 @@ across nodes only when they used the same GPU.
 | Lazy start | No VM exists until the first job for its tier. |
 | Accelerator check | Tier names are validated before `colab new` (the CLI maps unknown names to A100). After allocation, `nvidia-smi` must match the tier. Otherwise the VM is stopped and that tier is skipped for 30 minutes. |
 | Capacity refusals | A 5xx/"Service Unavailable" allocation is retried once after 20 s, then the tier is skipped for 3 minutes. Other refusals (entitlement, quota) skip it for 30 minutes. |
-| Session cap | At `max_sessions` VMs, the priciest idle one is stopped to make room. If all are busy, the job waits up to 30 minutes. |
+| Session cap | At `max_sessions` VMs, the priciest idle one is stopped to make room. If all are busy, a job for a new tier waits up to 30 minutes; a scale-out is skipped and the job queues. |
+| Replica cap | At most `max_replicas` VMs per tier, and a scale-out needs 30 minutes of budget at that tier's rate. |
 | Release after tree search | The launcher stops every VM before plotting, write-up and review, which need no GPU. |
 | Idle stop | The watchdog stops a VM with no running or queued jobs, or with an unreachable executor, after its tier's `idle_stop_minutes` (global default otherwise). The next job re-provisions it. |
 | Budget | Spend is the larger of the balance drop and usage rate × time, polled every five minutes. At `max_compute_units` every VM stops and later jobs fail with `RemoteExecutorUnavailable`. The balance is account-wide, so other Colab use counts too. |

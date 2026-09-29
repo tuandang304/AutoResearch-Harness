@@ -106,8 +106,10 @@ def main(args):
                 port = sock.getsockname()[1]
             server = subprocess.Popen(
                 [sys.executable, str(vm / "colab_server.py"), "--port", str(port)],
-                env=dict(os.environ, AISCI_TOKEN=token, AISCI_MAX_CONCURRENT="1",
-                         AISCI_JOBS_ROOT=str(vm / "jobs"), FAKE_TIER=info["gpu"]),
+                env=dict(os.environ, AISCI_TOKEN=token,
+                         AISCI_MAX_CONCURRENT=os.environ.get("FAKE_COLAB_SLOTS", "1"),
+                         AISCI_JOBS_ROOT=str(vm / "jobs"), FAKE_TIER=info["gpu"],
+                         FAKE_SESSION=session),
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True,
             )
             info.update(server_pid=server.pid, port=port, token=token)

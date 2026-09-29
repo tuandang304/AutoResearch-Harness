@@ -5,13 +5,14 @@ from pathlib import Path
 import stat
 import sys
 import tempfile
+import threading
 import unittest
 from unittest.mock import patch
 
 from autoresearch import colab_runtime
 from autoresearch.colab_runtime import (
     ColabPool, bootstrap_script, candidates, compute_instructions, is_oom, next_tier,
-    parse_compute, redact, validate_colab_settings,
+    overloaded, parse_compute, redact, validate_colab_settings,
 )
 from autoresearch.config import validate_config
 from ai_scientist.treesearch.interpreter import ExecutionResult
@@ -87,6 +88,15 @@ class PolicyTests(unittest.TestCase):
         fixed = validate_colab_settings({"selection": "fixed", "gpu": ["L4", "T4"]})
         self.assertEqual(candidates(fixed, "A100"), ["L4", "T4"])
         self.assertIsNone(next_tier(fixed, "L4"))
+
+    def test_overload_detection(self):
+        self.assertTrue(overloaded({"running": 1, "queued": 0, "max_concurrent": 1}))
+        self.assertFalse(overloaded({"running": 1, "queued": 0, "max_concurrent": 2,
+                                     "gpu": "Tesla T4, 4000 MiB, 15360 MiB"}))
+        self.assertTrue(overloaded({"running": 1, "queued": 0, "max_concurrent": 2,
+                                    "gpu": "Tesla T4, 14000 MiB, 15360 MiB"}))
+        self.assertFalse(overloaded({"running": 0, "queued": 0, "max_concurrent": 1,
+                                     "gpu": "Tesla T4, 14000 MiB, 15360 MiB"}))  # leftover cache
 
     def test_oom_detection(self):
         oom = ExecutionResult(["RuntimeError: CUDA out of memory. Tried"], 1.0, "RuntimeError")
@@ -270,7 +280,8 @@ class PoolTests(unittest.TestCase):
         lines = compute_instructions()["Compute selection"]
         text = "\n".join(lines)
         for fragment in ("# COMPUTE: <tier>", "cpu: no GPU", "T4: 15 GB", "A100: 40 GB",
-                         "Remaining run budget: 12.0 of 12", "runs on T4"):
+                         "Remaining run budget: 12.0 of 12", "runs on T4",
+                         "another VM of the same tier (up to 2)"):
             self.assertIn(fragment, text)
         self.run_job()
         self.assertIn("T4: 15 GB GPU memory, ~1.19", "\n".join(compute_instructions()["Compute selection"]))
@@ -326,6 +337,83 @@ class PoolTests(unittest.TestCase):
         self.assertEqual(pool.load()["sessions"]["T4"]["stop_reason"], "tunnel-unreachable")
         self.assertEqual(self.vm_sessions(), [])
 
+    def background_job(self, code, results, name):
+        thread = threading.Thread(target=lambda: results.__setitem__(name, self.run_job(code)))
+        thread.start()
+        return thread
+
+    def wait_until_running(self, pool, key="T4"):
+        for _ in range(200):
+            health = pool.health(pool.load()["sessions"].get(key, {"executor_path": "/none"}))
+            if health and health["running"]:
+                return
+            colab_runtime.time.sleep(0.05)
+        self.fail("background job never started")
+
+    def test_busy_tier_scales_out_to_another_vm_and_back_in_when_idle(self):
+        pool = self.managed(idle_stop_minutes=None, max_sessions=3)
+        results = {}
+        self.run_job("# COMPUTE: T4\nprint('warm')")
+        thread = self.background_job("# COMPUTE: T4\nimport time\ntime.sleep(2)", results, "long")
+        self.wait_until_running(pool)
+        second = self.run_job("# COMPUTE: T4\nimport os\nprint('on', os.environ['FAKE_SESSION'])")
+        thread.join()
+        self.assertIn("-t4-2", "".join(second.term_out))
+        self.assertIn("started T4 replica 2", second.term_out[0])
+        self.assertIsNone(results["long"].exc_type)
+        sessions = pool.load()["sessions"]
+        self.assertEqual(sorted(k for k, e in sessions.items() if e["up"]), ["T4", "T4.2"])
+        self.assertEqual(sorted(r["replica"] for r in self.records()), ["T4", "T4", "T4.2"])
+        # Both idle again: the next job reuses a VM instead of starting a third.
+        self.run_job("# COMPUTE: T4\nprint(1)")
+        self.assertEqual(sum("--gpu T4" in c for c in self.calls()), 2)
+        # Scale-in is the per-replica idle stop.
+        state = pool.load()
+        state["settings"]["idle_stop_minutes"] = 0
+        pool.save(state)
+        pool.watch(once=True)
+        self.assertEqual(self.vm_sessions(), [])
+
+    def test_scale_out_limits_queue_the_job_instead(self):
+        for limits, reason in (({"max_replicas": 1}, "max_replicas=1"),
+                               ({"max_sessions": 1}, "max_sessions=1 VMs are all busy"),
+                               ({"max_compute_units": 0.3}, "scale-out reserve")):
+            with self.subTest(limits=limits):
+                pool = self.managed(idle_stop_minutes=None, **limits)
+                results = {}
+                thread = self.background_job("# COMPUTE: T4\nimport time\ntime.sleep(1.5)",
+                                             results, "long")
+                self.wait_until_running(pool)
+                queued = self.run_job("# COMPUTE: T4\nprint('after')")
+                thread.join()
+                self.assertIn(reason, queued.term_out[0])
+                self.assertIn("queued on T4", queued.term_out[0])
+                self.assertNotIn("T4.2", pool.load()["sessions"])
+                colab_runtime.release_from_env("next")
+
+    def test_oom_on_a_shared_gpu_reruns_alone_on_the_same_tier(self):
+        os.environ["FAKE_COLAB_SLOTS"] = "2"
+        flag = self.dir / "contention"
+        pool = self.managed(idle_stop_minutes=None, max_sessions=3)
+        results = {}
+        thread = self.background_job(
+            f"# COMPUTE: T4\nimport time, pathlib\np = pathlib.Path({str(flag)!r})\n"
+            "p.touch()\ntime.sleep(2.5)\np.unlink()", results, "neighbour")
+        self.wait_until_running(pool)
+        victim = self.run_job(
+            f"# COMPUTE: T4\nimport os, pathlib\n"
+            f"if pathlib.Path({str(flag)!r}).exists() and not os.environ['FAKE_SESSION'].endswith('-2'):\n"
+            "    raise RuntimeError('CUDA out of memory. Tried to allocate 1 GiB')\n"
+            "print('ran on', os.environ['FAKE_SESSION'])")
+        thread.join()
+        self.assertIsNone(victim.exc_type)
+        self.assertIn("re-ran alone", victim.term_out[0])
+        self.assertIn("-t4-2", "".join(victim.term_out))
+        self.assertFalse(any("--gpu L4" in c for c in self.calls()))  # no tier escalation
+        record = next(r for r in self.records() if r["replica"] == "T4.2")
+        self.assertEqual((record["shared"], record["escalated_from"]), (False, None))
+        self.assertIn("re-ran alone", " ".join(record["notes"]))
+
     def test_bootstrap_failure_detected_despite_zero_exit(self):
         os.environ["FAKE_COLAB_BOOT_FAIL"] = "1"
         pool = self.managed()
@@ -356,7 +444,7 @@ class PoolTests(unittest.TestCase):
         executor = self.dir / "remote_executor.json"
         pool = ColabPool.create({"selection": "fixed", "gpu": ["L4", "T4"], "packages": []},
                                 executor_path=executor, session="manual-exec")
-        tier, path, notes = pool.acquire("A100")  # declarations are ignored in fixed mode
+        tier, _, path, notes, _ = pool.acquire("A100")  # declarations are ignored in fixed mode
         self.assertEqual((tier, Path(path)), ("T4", executor.resolve()))
         self.assertEqual(self.vm_sessions(), ["manual-exec"])
         self.assertTrue(notes and notes[0].startswith("L4:"))

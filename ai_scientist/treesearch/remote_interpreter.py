@@ -135,6 +135,7 @@ class RemoteInterpreter:
         # stays for undeclared follow-up code (metric parsing, plotting).
         self._executor = None
         self._tier = None
+        self._replica = None  # e.g. T4 or T4.2 when a busy tier was scaled out
 
     def _config(self) -> tuple[str, str]:
         return load_remote_config(self._executor)
@@ -208,7 +209,7 @@ class RemoteInterpreter:
         """Provision or reconnect this job's tier; budget/release errors propagate."""
         from autoresearch.colab_runtime import managed_pool
 
-        self._executor = managed_pool().ensure(self._tier)
+        self._executor = managed_pool().ensure(self._replica)
 
     # ------------------------------------------------------------- workspace
 
@@ -247,18 +248,22 @@ class RemoteInterpreter:
         return self._run_managed(code, tgz_b64, sent)
 
     def _run_managed(self, code: str, tgz_b64: str, sent: set[str]) -> ExecutionResult:
-        """Run on the tier the code declares; re-run once a tier larger on CUDA OOM."""
+        """Run on the tier the code declares (placement may scale the tier out).
+
+        A CUDA OOM is re-run once: alone on the same tier if the VM was shared,
+        otherwise on the next larger tier.
+        """
         from autoresearch import colab_runtime as colab
 
         pool = colab.managed_pool()
         settings = pool.load()["settings"]
         declared, reason = colab.parse_compute(code)
         requested = declared or self._tier
-        notes, escalated_from = [], None
+        notes, escalated_from, rerun, exclusive = [], None, False, False
         wait_until = time.monotonic() + self.wait_minutes * 60
         while True:
             try:
-                self._tier, self._executor, skipped = pool.acquire(requested)
+                placed = pool.acquire(requested, exclusive=exclusive)
             except colab.NoTierAvailable as exc:
                 # Colab capacity; budget/release errors are not retried.
                 if time.monotonic() >= wait_until:
@@ -266,22 +271,31 @@ class RemoteInterpreter:
                 logger.warning("%s; retrying in 60s", exc)
                 time.sleep(min(60, max(0, wait_until - time.monotonic())))
                 continue
-            notes += skipped
+            self._tier, self._replica, self._executor = placed.tier, placed.key, placed.path
+            notes += placed.notes
             result, received = self._execute(code, tgz_b64, sent)
-            larger = colab.next_tier(settings, self._tier) if colab.is_oom(result) else None
-            if larger is None or escalated_from is not None:
+            if rerun or not colab.is_oom(result):
                 break
-            # Same code and uploaded snapshot; drop files the failed attempt created.
-            for rel in received - sent:
+            # One re-run of the same code and uploaded snapshot: alone on this tier
+            # if the GPU was shared, else on the next larger tier.
+            larger = colab.next_tier(settings, self._tier)
+            if placed.shared:
+                notes.append(f"out of GPU memory while sharing {self._replica}; re-ran alone")
+                requested, exclusive = self._tier, True
+            elif larger:
+                notes.append(f"{self._tier} ran out of GPU memory; re-ran on {larger}")
+                escalated_from, requested = self._tier, larger
+            else:
+                break
+            for rel in received - sent:  # drop files the failed attempt created
                 safe_path(self.working_dir, rel).unlink(missing_ok=True)
-            notes.append(f"{self._tier} ran out of GPU memory; re-ran on {larger}")
-            escalated_from, requested = self._tier, larger
-        entry = pool.load()["sessions"].get(self._tier, {})
+            rerun = True
+        entry = pool.load()["sessions"].get(self._replica, {})
         rate = colab.tier_rate(pool, self._tier)
         summary = (
             f"[compute] Requested {declared or 'no tier'}"
             + (f" ({reason})" if reason else "")
-            + f"; ran on {self._tier} ({entry.get('gpu')}) in {result.exec_time:.0f}s"
+            + f"; ran on {self._replica} ({entry.get('gpu')}) in {result.exec_time:.0f}s"
             + (f", ~{rate * result.exec_time / 3600:.3f} compute units" if rate else "")
             + "".join(f". {note}" for note in notes)
             + ".\n"
@@ -289,10 +303,11 @@ class RemoteInterpreter:
         result.term_out = [summary] + list(result.term_out)
         colab.log_compute({
             "time": time.time(), "workspace": str(self.working_dir),
-            "declared": declared, "reason": reason, "tier": self._tier,
+            "declared": declared, "reason": reason, "tier": self._tier, "replica": self._replica,
             "gpu": entry.get("gpu"), "exec_time": result.exec_time,
             "estimated_units": rate * result.exec_time / 3600 if rate else None,
-            "escalated_from": escalated_from, "notes": notes, "exc_type": result.exc_type,
+            "escalated_from": escalated_from, "shared": placed.shared, "notes": notes,
+            "exc_type": result.exc_type,
         })
         return result
 

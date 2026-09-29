@@ -51,7 +51,8 @@ notebook embeddings.
   the offline suite. Authenticated CLI availability is account/version dependent.
   Colab CLI provisioning is tested offline against `tests/fixtures/fake_colab.py`;
   its bootstrap and tier routing were checked live on CPU and T4 runtimes with
-  CLI 0.7.4. L4/A100 routing and OOM escalation are covered offline only.
+  CLI 0.7.4. L4/A100 routing, OOM re-runs and replica scale-out are covered
+  offline only.
 - The execution service and local interpreter run arbitrary generated code with
   user permissions. Workspace validation does not isolate that code.
 - Full pipeline resume after controller shutdown is not implemented. Journals,

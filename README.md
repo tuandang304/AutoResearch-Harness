@@ -106,7 +106,9 @@ and launch with `--exec_backend colab`. The code model declares a tier for each
 script (`# COMPUTE: T4`) from the configured menu (cpu, T4, L4, A100 by
 default). Each tier's VM starts on its first job. VMs stop when the tree search
 ends, after their idle limit, at `max_compute_units`, or if the controller
-dies. Out-of-memory failures are re-run once on the next tier. Choices and
+dies. When every VM of a tier is overloaded, another one of that tier starts
+(`max_replicas`, `max_sessions`). Out-of-memory failures are re-run once: alone if
+the GPU was shared, otherwise on the next tier. Choices and
 estimated units are logged in the run's `compute.jsonl`. For a standalone
 executor: `python -m autoresearch.colab_runtime up --gpu T4` (then `status` /
 `down`).

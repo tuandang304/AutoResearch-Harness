@@ -38,6 +38,7 @@ exec:
       L4:   {rate: 1.71, memory_gb: 22, use: "mid-size models or batches that exceed a T4, bf16, roughly 2x T4 speed"}
       A100: {rate: 5.40, memory_gb: 40, idle_stop_minutes: 10, use: "large models or long training that cannot fit the time limit on L4"}
     max_sessions: 2          # concurrent VMs across tiers; an idle one is stopped to make room
+    max_replicas: 2          # VMs per tier; another starts when every one is overloaded
     max_upgrade_ratio: 1.5   # an unavailable tier may fall back to one costing <= 1.5x (1 = never)
     escalate_on_oom: true    # re-run a CUDA out-of-memory failure once on the next larger tier
     high_mem: false
