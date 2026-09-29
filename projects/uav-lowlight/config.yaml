@@ -1,0 +1,115 @@
+# path to the task data directory
+llm_config: configs/llm.yaml
+data_dir: "data"
+preprocess_data: False
+
+goal: null
+eval: null
+
+log_dir: logs
+workspace_dir: workspaces
+
+# whether to copy the data to the workspace directory (otherwise it will be symlinked)
+# copying is recommended to prevent the agent from accidentally modifying the original data
+copy_data: True
+
+exp_name: run # a random experiment name will be generated if not provided
+
+# settings for code execution
+exec:
+  timeout: 3000             # 50 min hard limit; scripts target <= 40 min
+  agent_file_name: runfile.py
+  format_tb_ipython: False
+  # where experiment code runs:
+  #   local - on this machine (needs a CUDA GPU for anything non-trivial)
+  #   colab - on a Google Colab GPU via notebooks/colab_gpu_executor.ipynb
+  #           (connection details in remote_executor.json), or a runtime the
+  #           Colab CLI provisions per run when colab.auto_provision is true
+  backend: colab
+  local_postprocessing: true # plots and metric parsing run here without torch
+  remote_max_file_mb: 50     # files larger than this are not synced back from Colab
+  remote_wait_minutes: 60    # how long to wait for Colab to come back after a disconnect
+  colab:                     # see docs/remote-execution.md, "Colab CLI provisioning"
+    auto_provision: true     # true: create VMs on demand, stop them after tree search
+    selection: llm           # llm: the code model declares a tier per script; fixed: always `gpu`
+    gpu: T4                  # default tier (fixed: T4 | L4 | G4 | A100 | H100 | cpu, or a fallback list)
+    tiers:                   # tiers the model may choose; rate = compute units/hour (reference values)
+      cpu:  {rate: 0.08, use: "no GPU: numpy/pandas/scikit-learn, tiny PyTorch models, data preparation"}
+      T4:   {rate: 1.19, memory_gb: 15, use: "small CNNs/MLPs/RNNs, transformers up to ~100M parameters, fp16"}
+      L4:   {rate: 1.71, memory_gb: 22, use: "mid-size models or batches that exceed a T4, bf16, roughly 2x T4 speed; prefer for training two detector arms"}
+      # A100 omitted: YOLOv8n fine-tuning does not need it (study budget)
+    max_sessions: 2          # concurrent VMs across tiers; an idle one is stopped to make room
+    max_replicas: 2          # VMs per tier; another starts when every one is overloaded
+    max_upgrade_ratio: 1.5   # an unavailable tier may fall back to one costing <= 1.5x (1 = never)
+    escalate_on_oom: true    # re-run a CUDA out-of-memory failure once on the next larger tier
+    high_mem: false
+    idle_stop_minutes: 30    # stop an idle VM; the next job re-provisions it (null = never)
+    max_compute_units: 50    # stop all VMs and fail the run after this spend (null = no cap)
+    min_balance: 5           # refuse to provision below this account balance
+    max_concurrent: 1        # one detector training per VM; a second job scales out
+    packages: [ultralytics, pycocotools]
+
+generate_report: True
+# LLM settings for final report from journal
+report:
+  model: router/summary
+  temp: 1.0
+
+experiment:
+  num_syn_datasets: 1
+
+debug:
+  stage4: False
+
+# agent hyperparams
+# Legacy concrete Codex overrides only; routed profiles have per-call effort.
+codex_reasoning_effort: low
+agent:
+  orchestrator: {model: router/orchestrator, temp: 0.2}
+  type: parallel
+  num_workers: 2
+  stages:
+    stage1_max_iters: 6
+    stage2_max_iters: 4
+    stage3_max_iters: 5
+    stage4_max_iters: 4
+  # how many improvement iterations to run
+  steps: 5 # if stage-specific max_iters are not provided, the agent will use this value for all stages
+  # whether to instruct the agent to use CV (set to 1 to disable)
+  k_fold_validation: 1
+  multi_seed_eval:
+    num_seeds: 3 # should be the same as num_workers if num_workers < 3. Otherwise, set it to be 3.
+  # whether to instruct the agent to generate a prediction function
+  expose_prediction: False
+  # whether to provide the agent with a preview of the data
+  data_preview: False
+
+  # LLM settings for coding
+  code:
+    model: router/code
+    temp: 1.0
+    max_tokens: 12000
+
+  # LLM settings for evaluating program output / tracebacks
+  feedback:
+    model: router/feedback
+    temp: 0.5
+    max_tokens: 8192
+
+  vlm_feedback:
+    model: router/vision
+    temp: 0.5
+    max_tokens: null
+
+  search:
+    max_debug_depth: 3
+    debug_prob: 0.5
+    num_drafts: 2
+
+  summary:
+    model: router/summary
+    temp: 0.3
+
+  select_node:
+    model: router/orchestrator
+    temp: 0.3
