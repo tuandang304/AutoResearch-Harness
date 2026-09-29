@@ -168,7 +168,9 @@ def prepare(cache=None, source=None):
                         labels=labels.tolist(), ignore=ignore.tolist())
 
         index = {g: _parallel(record, manifest["groups"][g]) for g in GROUPS}
-        index_path.write_text(json.dumps(index))
+        tmp = index_path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(index))
+        tmp.replace(index_path)  # atomic: an interrupted job never leaves half a file
         log(f"indexed {sum(map(len, index.values()))} images in {time.time() - t0:.0f}s")
     groups = json.loads(index_path.read_text())
     for recs in groups.values():
@@ -192,8 +194,8 @@ def manifest_hash():
 
 
 def _synthetic_eval_set(data, base, name):
-    out = data.cache / name
-    marker = _step(name, data.cache)
+    out = data.cache / f"{name}_v{__version__}"
+    marker = _step(f"{name}_v{__version__}", data.cache)
     records = [dict(r, path=str(out / Path(r["path"]).name), key=f"{name}/{Path(r['path']).name}")
                for r in data.groups[base]]
     if not marker.exists():
@@ -217,15 +219,39 @@ def _synthetic_eval_set(data, base, name):
 
 
 SODIUM_RGB = (1.0, 0.72, 0.38)  # linear gains of a warm sodium-vapour cast
+# Calibrated (2026-09-29) so the median-luma quantiles of synthetic day_train copies
+# match night_train (10/50/90%: 0.043/0.071/0.137 vs 0.039/0.078/0.141). The
+# MAET-like range (0.05, 0.3) gives 0.110/0.161/0.256, mostly brighter than night.
+EXPOSURE = (0.005, 0.1)
+UNCALIBRATED_EXPOSURE = (0.05, 0.3)
 
 
-def synth_lowlight(img, rng, darken=True, noise=True, cast=False,
-                   exposure=(0.05, 0.3), shot=(1e-4, 1e-2), read=(1e-3, 1e-2), gamma=2.2):
+def light_pools(shape, rng, ambient, count=(2, 8), amplitude=(0.05, 0.6), width=(0.02, 0.06)):
+    """Spatially varying illumination: ambient level plus Gaussian pools of light
+    (street lamps, shop fronts), as a linear-intensity gain map of `shape`. The
+    defaults give median-luma quantiles close to night_train (10/50/90%:
+    0.051/0.078/0.141 on 100 day_train images)."""
+    h, w = shape[:2]
+    gh, gw = max(2, h // 16), max(2, w // 16)
+    yy, xx = np.mgrid[0:gh, 0:gw].astype(np.float32)
+    gain = np.full((gh, gw), ambient, np.float32)
+    diag = float(np.hypot(gh, gw))
+    for _ in range(int(rng.integers(count[0], count[1] + 1))):
+        cy, cx = rng.uniform(0, gh), rng.uniform(0, gw)
+        sigma = rng.uniform(*width) * diag
+        amp = float(np.exp(rng.uniform(np.log(amplitude[0]), np.log(amplitude[1]))))
+        gain += amp * np.exp(-((yy - cy) ** 2 + (xx - cx) ** 2) / (2 * sigma * sigma))
+    return _cv2().resize(np.clip(gain, 0, 1.0), (w, h), interpolation=_cv2().INTER_CUBIC)
+
+
+def synth_lowlight(img, rng, darken=True, noise=True, cast=False, pools=False,
+                   exposure=EXPOSURE, shot=(1e-4, 1e-2), read=(1e-3, 1e-2), gamma=2.2):
     """Physics-inspired low light on a BGR uint8 image (returns BGR uint8).
 
-    sRGB -> linear (gamma 2.2); optional warm cast; exposure k ~ LogUniform;
-    Poisson-Gaussian noise in linear space (shot variance a*x, a ~ LogUniform;
-    read std s ~ LogUniform); clip; re-apply gamma; the caller JPEG-encodes.
+    sRGB -> linear (gamma 2.2); optional warm cast; global exposure k ~ LogUniform
+    (or, with pools=True, ambient k plus Gaussian light pools); Poisson-Gaussian
+    noise in linear space (shot variance a*x, a ~ LogUniform; read std s ~
+    LogUniform); clip; re-apply gamma; the caller JPEG-encodes.
     darken=False keeps normal exposure (noise-only ablation); noise=False
     darkens without noise (darkening-only ablation).
     """
@@ -236,7 +262,9 @@ def synth_lowlight(img, rng, darken=True, noise=True, cast=False,
     x = (img.astype(np.float32) / 255.0) ** gamma
     if cast:
         x = x * np.array(SODIUM_RGB[::-1], np.float32)  # BGR order
-    if darken:
+    if darken and pools:
+        x = x * light_pools(x.shape, rng, loguniform(exposure))[..., None]
+    elif darken:
         x = x * loguniform(exposure)
     if noise:
         a, s = loguniform(shot), loguniform(read)
@@ -298,13 +326,13 @@ def _link_split(records, root, split, image_for):
 
 
 def build_training_set(data, arm, seed, fraction=None, darken=True, noise=True, cast=False,
-                       tag=None):
+                       pools=False, exposure=EXPOSURE, tag=None):
     """Write an Ultralytics dataset for one arm and training seed; returns data.yaml.
 
     Every arm has exactly len(day_train) training images; only the images differ.
       A: day_train unchanged.
       B: a seeded random `fraction` (default 0.5) of day_train replaced by synthetic
-         low-light copies (darken/noise/cast switches select ablations).
+         low-light copies (darken/noise/cast/pools/exposure select ablations).
       C: randomly chosen day_train images replaced by all night_train images
          (a real-night reference, not a proposed method).
     Validation during training (if enabled) uses day_tune only.
@@ -312,7 +340,8 @@ def build_training_set(data, arm, seed, fraction=None, darken=True, noise=True, 
     day = data.groups["day_train"]
     rng = np.random.default_rng([int(seed), 7])
     options = dict(arm=arm, seed=int(seed), fraction=fraction, darken=darken, noise=noise,
-                   cast=cast, manifest=manifest_hash(), version=__version__)
+                   cast=cast, pools=pools, exposure=list(exposure), manifest=manifest_hash(),
+                   version=__version__)
     tag = tag or "_".join(f"{k}{v}" for k, v in options.items() if k not in ("manifest", "version"))
     root = RUNS / "datasets" / hashlib.sha1(json.dumps(options, sort_keys=True).encode()).hexdigest()[:10]
     marker = root / ".done"
@@ -347,7 +376,8 @@ def build_training_set(data, arm, seed, fraction=None, darken=True, noise=True, 
         out = synth_dir / name
         img_rng = np.random.default_rng(_seed_for(name, seed))
         cv2.imwrite(str(out), synth_lowlight(cv2.imread(record["path"]), img_rng, darken=darken,
-                                             noise=noise, cast=cast),
+                                             noise=noise, cast=cast, pools=pools,
+                                             exposure=exposure),
                     [cv2.IMWRITE_JPEG_QUALITY, 95])
         return str(out)
 

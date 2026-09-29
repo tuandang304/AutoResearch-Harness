@@ -22,6 +22,19 @@ cp projects/regularization/ideas.json projects/my-study/ideas.json
 python -m autoresearch --project projects/my-study --dry-run
 ```
 
+Study-specific controls:
+
+- ideas.json `Experiments` reaches every stage (label steps by stage). Optional
+  `"Stage Goals": {"1": "...", ..., "4": "..."}` replaces the generic goals of those
+  stages, which otherwise ask for extra HuggingFace datasets in stages 2 and 3.
+- `exec.support_files` lists files (relative to the project config) that are
+  snapshotted into the run's `support/` folder and copied into every node workspace,
+  so experiment code can import a vetted helper instead of re-implementing it.
+  Each file must be under 1 MB; code prompts name them.
+- `agent.multi_seed_eval.stages` (default `[1, 2, 3, 4]`) limits seed re-runs of
+  the best node to the listed main stages.
+- Sub-stages share their main stage's `stageN_max_iters` node budget.
+
 The existing ideation tool accepts --workshop-file projects/my-study/brief.md.
 Inspect generated candidates and save selected inputs as ideas.json. Generation
 does not establish novelty or verify literature.

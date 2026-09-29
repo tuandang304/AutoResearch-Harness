@@ -67,6 +67,19 @@ notebook embeddings.
 - The LaTeX templates and summary consumers expect the standard `run` experiment
   name. Use `--output-dir` for an alternate output location.
 
+## Study inputs and search fixes
+
+Stages 2 and 4 now see the research idea and experiment plan when proposing and
+implementing tuning and ablations. Projects can override stage goals, ship support
+files and restrict seed evaluation (see [project workflow](projects.md)). Sub-stages
+keep their main stage number, receive the carried-over best node and share the
+stage's node budget; summaries take one journal per main stage. Nodes that save no
+`.npy` data are debugged instead of stalling. Failed plotting code is retried. The
+best-node prompt includes analysis and plot feedback. The remote runner executes
+scripts as a real `__main__` module, so process pools can pickle their functions.
+A Colab status call that fails (for example a DNS error) no longer provisions a
+replacement VM; the job waits and reconnects to the existing one.
+
 ## Changes in this development update
 
 See [model routing](llm-routing.md) for profile selection, live verification,
