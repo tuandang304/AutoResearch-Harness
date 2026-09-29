@@ -12,6 +12,8 @@ import yaml
 from autoresearch.config import ROOT, idea_slug, load_run_config, validate_config
 from launch_scientist_bfts import main, find_pdf_path_for_review
 
+FIXTURE_PROJECT = ROOT / "tests" / "fixtures" / "project"
+
 
 class PipelineTests(unittest.TestCase):
     def test_project_paths_and_overrides_do_not_create_outputs(self):
@@ -208,7 +210,7 @@ class PipelineTests(unittest.TestCase):
             stack.enter_context(patch("ai_scientist.treesearch.perform_experiments_bfts_with_agentmanager.perform_experiments_bfts", side_effect=experiments))
             plots = stack.enter_context(patch("ai_scientist.perform_plotting.aggregate_plots"))
             writer = stack.enter_context(patch("ai_scientist.perform_writeup.perform_writeup"))
-            self.assertEqual(main(["--experiments-only", "--output-dir", directory]), 0)
+            self.assertEqual(main(["--project", str(FIXTURE_PROJECT), "--experiments-only", "--output-dir", directory]), 0)
             plots.assert_not_called()
             writer.assert_not_called()
 
@@ -218,6 +220,8 @@ class PipelineTests(unittest.TestCase):
         ):
             result = main(
                 [
+                    "--project",
+                    str(FIXTURE_PROJECT),
                     "--provider",
                     "codex",
                     "--exec_backend",
@@ -253,9 +257,9 @@ class PipelineTests(unittest.TestCase):
 
     def test_missing_idea_and_out_of_range_index(self):
         with redirect_stderr(io.StringIO()):
-            self.assertEqual(main(["--dry-run", "--idea_idx", "-1"]), 1)
+            self.assertEqual(main(["--project", str(FIXTURE_PROJECT), "--dry-run", "--idea_idx", "-1"]), 1)
             self.assertEqual(
-                main(["--dry-run", "--load_ideas", "/no-such-ideas.json"]), 1
+                main(["--project", str(FIXTURE_PROJECT), "--dry-run", "--load_ideas", "/no-such-ideas.json"]), 1
             )
 
     def test_pdf_selection(self):
@@ -318,6 +322,8 @@ class PipelineTests(unittest.TestCase):
                 )
                 code = main(
                     [
+                        "--project",
+                        str(FIXTURE_PROJECT),
                         "--output-dir",
                         directory,
                         "--writeup-type",

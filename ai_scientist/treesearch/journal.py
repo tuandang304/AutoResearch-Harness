@@ -462,20 +462,12 @@ class Journal:
         # Gather info about each node
         for node in nodes:
             if not node.is_seed_node:
-                candidate_info = (
-                    f"ID: {node.id}\n" f"Metric: {str(node.metric)}\n"
-                    if node.metric
-                    else (
-                        "N/A\n" f"Training Analysis: {node.analysis}\n"
-                        if hasattr(node, "analysis")
-                        else (
-                            "N/A\n" f"VLM Feedback: {node.vlm_feedback_summary}\n"
-                            if hasattr(node, "vlm_feedback_summary")
-                            else "N/A\n"
-                        )
-                    )
-                )
-                prompt["Candidates"] += candidate_info
+                candidate_info = f"ID: {node.id}\nMetric: {node.metric if node.metric else 'N/A'}\n"
+                if getattr(node, "analysis", None):
+                    candidate_info += f"Training Analysis: {node.analysis}\n"
+                if getattr(node, "vlm_feedback_summary", None):
+                    candidate_info += f"VLM Feedback: {node.vlm_feedback_summary}\n"
+                prompt["Candidates"] += candidate_info + "\n"
 
         try:
             if cfg is None or cfg.agent.get("select_node", None) is None:

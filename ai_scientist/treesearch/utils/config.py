@@ -68,7 +68,7 @@ class AgentConfig:
     search: SearchConfig
     num_workers: int
     type: str
-    multi_seed_eval: dict[str, int]
+    multi_seed_eval: dict[str, Any]  # num_seeds; optional stages (default 1-4)
 
     summary: Optional[StageConfig] = None
     select_node: Optional[StageConfig] = None
@@ -87,6 +87,8 @@ class ExecConfig:
     remote_max_file_mb: float = 100
     remote_wait_minutes: float = 60
     local_postprocessing: bool = False
+    # files copied into every node workspace, importable by experiment code
+    support_files: Optional[list] = None
     # Colab CLI provisioning for backend colab (autoresearch/colab_runtime.py)
     colab: Optional[Dict[str, Any]] = None
 

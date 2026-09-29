@@ -159,14 +159,15 @@ class RoutingFailureTests(unittest.TestCase):
                     return ExecutionResult(["ok"], 1.0, None)
 
                 interpreter.run.side_effect = execute
-                if phase != "metrics":
-                    # Skip metric parsing to reach the plotting handlers.
-                    worker.parse_exec_result.side_effect = lambda **kw: next(Path(root).glob("run/process_*/working/data.npy")).rename(Path(root) / "data.npy")
+                # Metric parsing succeeds so the plotting handlers are reached.
+                parsed = {"valid_metrics_received": True, "metric_names": [{
+                    "metric_name": "accuracy", "lower_is_better": False, "description": "test",
+                    "data": [{"dataset_name": "d", "final_value": 1.0, "best_value": 1.0}]}]}
                 if phase == "plotting":
                     worker._generate_plotting_code.side_effect = self.failure
                 if phase == "vision":
                     worker._analyze_plots_with_vlm.side_effect = self.failure
-                with patch.dict(os.environ), patch("ai_scientist.treesearch.parallel_agent.MinimalAgent", return_value=worker), patch("ai_scientist.treesearch.remote_interpreter.make_interpreter", return_value=interpreter), patch("ai_scientist.treesearch.parallel_agent.query", side_effect=self.failure) as query:
+                with patch.dict(os.environ), patch("ai_scientist.treesearch.parallel_agent.MinimalAgent", return_value=worker), patch("ai_scientist.treesearch.remote_interpreter.make_interpreter", return_value=interpreter), patch("ai_scientist.treesearch.parallel_agent.query", side_effect=self.failure if phase == "metrics" else [parsed]) as query:
                     with self.assertRaises(RouterUnavailable) as caught:
                         ParallelAgent._process_node_wrapper(None, "test", self.cfg)
                 self.assertIs(caught.exception, self.failure)
@@ -174,7 +175,8 @@ class RoutingFailureTests(unittest.TestCase):
                 self.assertEqual(len(list(Path(root).glob("run/process_*/experiment_code.py"))), 1)
                 self.assertTrue(list(Path(root).rglob("data.npy")))
                 self.assertGreaterEqual(interpreter.cleanup_session.call_count, 1)
-                self.assertEqual(interpreter.run.call_count, 1 if phase == "plotting" else 2)
+                # main run, metric parsing, then plotting (vision phase only)
+                self.assertEqual(interpreter.run.call_count, {"metrics": 2, "plotting": 2, "vision": 3}[phase])
                 if phase == "metrics":
                     query.assert_called_once()
 

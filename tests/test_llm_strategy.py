@@ -13,6 +13,8 @@ import yaml
 from omegaconf import OmegaConf
 
 from autoresearch.config import ROOT, load_run_config
+
+FIXTURE_PROJECT = ROOT / "tests" / "fixtures" / "project"
 from autoresearch.llm_strategy import decision_model
 from launch_scientist_bfts import main, snapshot_llm_policy
 
@@ -36,7 +38,7 @@ class StrategyTests(unittest.TestCase):
     def test_dry_run_resolves_paper_roles_and_explicit_override(self):
         output = io.StringIO()
         with contextlib.redirect_stdout(output):
-            status = main([
+            status = main(["--project", str(FIXTURE_PROJECT),
                 "--config", str(ROOT / "tests/fixtures/pipeline.yaml"),
                 "--dry-run", "--orchestrator-model", "codex/gpt-6-sol",
                 "--worker-model", "codex/test-worker",

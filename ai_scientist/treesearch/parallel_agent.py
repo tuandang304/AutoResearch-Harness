@@ -531,12 +531,21 @@ class MinimalAgent:
 
     @property
     def _prompt_compute(self):
-        """Colab tier menu when the code model selects compute (exec.colab.selection=llm)."""
+        """Colab tier menu when the code model selects compute (exec.colab.selection=llm),
+        and the helper modules available to import."""
+        prompt = {}
+        support = [Path(p).name for p in getattr(self.cfg.exec, "support_files", None) or []]
+        if support:
+            prompt["Support files"] = (
+                "These files are in the script's working directory (next to it, not in "
+                "./working) and can be imported directly: " + ", ".join(support) + ". "
+                "Use them as the research idea describes instead of re-implementing them."
+            )
         if self.cfg.exec.backend != "colab":
-            return {}
+            return prompt
         from autoresearch.colab_runtime import compute_instructions
 
-        return compute_instructions() or {}
+        return prompt | (compute_instructions() or {})
 
     @property
     def _prompt_resp_fmt(self):
@@ -1621,6 +1630,8 @@ class ParallelAgent:
         # Create process-specific working directory
         working_dir = os.path.join(workspace, "working")
         os.makedirs(working_dir, exist_ok=True)
+        for support_file in getattr(cfg.exec, "support_files", None) or []:
+            shutil.copy2(support_file, workspace)
 
         if gpu_id is not None:
             os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
@@ -1733,6 +1744,15 @@ class ParallelAgent:
                 logger.warning(
                     "No .npy files found in working directory. Data may not have been saved properly."
                 )
+                if not child_node.is_buggy:
+                    # Without saved data nothing can be parsed or plotted; debug it
+                    # instead of leaving a node that is neither good nor buggy.
+                    child_node.is_buggy = True
+                    child_node.metric = WorstMetricValue()
+                    child_node.analysis = (child_node.analysis or "") + (
+                        " No .npy file was saved in ./working, so no metrics could be "
+                        "parsed: save the results to working/experiment_data.npy."
+                    )
             else:
                 if seed_eval:
                     # Use the parent node's parse code to parse the same data files again
@@ -1894,6 +1914,7 @@ class ParallelAgent:
                         plot_exec_result = post_interpreter.run(plotting_code, True)
                         post_interpreter.cleanup_session()
                         child_node.plot_exec_result = plot_exec_result
+                        child_node.absorb_plot_exec_result(plot_exec_result)
                         if child_node.plot_exc_type and retry_count < 3:
                             print(
                                 f"[red]Plotting code failed with exception: {child_node.plot_exc_type}[/red]"

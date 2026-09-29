@@ -330,6 +330,16 @@ def run_pipeline(args, idea, config):
             for key in ("desc_file", "workspace_dir", "data_dir", "log_dir")
         }
     )
+    if config["exec"].get("support_files"):
+        # Snapshot the importable helpers with the run; nodes copy them from here.
+        support_dir = Path(idea_dir) / "support"
+        support_dir.mkdir()
+        copies = []
+        for source_path in config["exec"]["support_files"]:
+            target = support_dir / Path(source_path).name
+            shutil.copy2(source_path, target)
+            copies.append(str(target))
+        config["exec"]["support_files"] = copies
     with open(idea_config_path, "w") as dest:
         yaml.safe_dump(config, dest)
     update_run_status(args, "running", stage="experiments")

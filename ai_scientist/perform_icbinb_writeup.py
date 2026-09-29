@@ -21,6 +21,7 @@ from ai_scientist.llm import (
 from ai_scientist.utils.token_tracker import track_token_usage
 
 from ai_scientist.tools.semantic_scholar import search_for_papers
+from ai_scientist.perform_writeup import compile_latex, run_chktex
 
 from ai_scientist.perform_vlm_review import (
     generate_vlm_img_review,
@@ -41,49 +42,6 @@ def remove_accents_and_clean(s):
     # Convert to lowercase
     ascii_str = ascii_str.lower()
     return ascii_str
-
-
-def compile_latex(cwd, pdf_file, timeout=30):
-    print("GENERATING LATEX")
-
-    commands = [
-        ["pdflatex", "-interaction=nonstopmode", "template.tex"],
-        ["bibtex", "template"],
-        ["pdflatex", "-interaction=nonstopmode", "template.tex"],
-        ["pdflatex", "-interaction=nonstopmode", "template.tex"],
-    ]
-
-    for command in commands:
-        try:
-            result = subprocess.run(
-                command,
-                cwd=cwd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                timeout=timeout,
-            )
-            print("Standard Output:\n", result.stdout)
-            print("Standard Error:\n", result.stderr)
-        except subprocess.TimeoutExpired:
-            print(
-                f"EXCEPTION in compile_latex: LaTeX timed out after {timeout} seconds."
-            )
-            print(traceback.format_exc())
-        except subprocess.CalledProcessError:
-            print(
-                f"EXCEPTION in compile_latex: Error running command {' '.join(command)}"
-            )
-            print(traceback.format_exc())
-
-    print("FINISHED GENERATING LATEX")
-
-    try:
-        shutil.move(osp.join(cwd, "template.pdf"), pdf_file)
-    except FileNotFoundError:
-        print("Failed to rename PDF.")
-        print("EXCEPTION in compile_latex while moving PDF:")
-        print(traceback.format_exc())
 
 
 def is_header_or_footer(line):
@@ -302,7 +260,29 @@ def check_page_limit(pdf_file, page_limit=4, timeout=30):
         return None
 
 
-def get_reflection_page_info(reflection_pdf, page_limit):
+def latex_error_tail(latex_folder, max_lines=30):
+    """Return the LaTeX error lines (or the log tail) from the last compile."""
+    try:
+        with open(
+            osp.join(latex_folder, "template.log"), "r", encoding="utf-8", errors="ignore"
+        ) as f:
+            lines = f.read().splitlines()
+    except OSError:
+        return "No LaTeX log was produced."
+    errors = []
+    for idx, line in enumerate(lines):
+        if line.startswith("!"):
+            errors.extend(lines[idx : idx + 3])
+    return "\n".join((errors or lines)[-max_lines:])
+
+
+def get_reflection_page_info(reflection_pdf, page_limit, latex_folder=None):
+    if latex_folder is not None and not (reflection_pdf and osp.exists(reflection_pdf)):
+        return (
+            "\nThe LaTeX did not compile to a PDF, so the page-limit check was skipped. "
+            "Fix these LaTeX errors first:\n```\n"
+            f"{latex_error_tail(latex_folder)}\n```\n"
+        )
     info = check_page_limit(reflection_pdf, page_limit)
     if info is not None:
         if "excess" in info:
@@ -863,6 +843,20 @@ def gather_citations(base_folder, num_cite_rounds=20, small_model="gpt-4o-2024-0
         return citations_text if citations_text else None
 
 
+def review_pdf_or_skip(review_fn, client, model, pdf_path, *args):
+    """Run a PDF-based VLM review, degrading to a note if it cannot run."""
+    if not (pdf_path and osp.exists(pdf_path)):
+        return "Skipped: the LaTeX did not compile to a PDF."
+    try:
+        return review_fn(client, model, pdf_path, *args)
+    except RouterUnavailable:
+        raise
+    except Exception as e:
+        print(f"EXCEPTION in {review_fn.__name__}:")
+        print(traceback.format_exc())
+        return f"Skipped: {review_fn.__name__} failed ({e})."
+
+
 def perform_writeup(
     base_folder,
     citations_text=None,
@@ -1020,6 +1014,10 @@ def perform_writeup(
         with open(writeup_file, "w") as f:
             f.write(updated_latex_code)
 
+        # Latest reflection PDF that compiled; used if the final step yields none.
+        last_compiled_pdf = None
+        reflection_pdf = None
+
         # Multiple reflection loops on the final LaTeX
         for i in range(n_writeup_reflections):
             with open(writeup_file, "r") as f:
@@ -1040,24 +1038,25 @@ def perform_writeup(
             )
             # Compile current version before reflection
             print(f"[green]Compiling PDF for reflection {i+1}...[/green]")
-            compile_latex(latex_folder, reflection_pdf)
+            if compile_latex(latex_folder, reflection_pdf):
+                last_compiled_pdf = reflection_pdf
 
-            review_img_cap_ref = perform_imgs_cap_ref_review(
-                vlm_client, vlm_model, reflection_pdf
+            review_img_cap_ref = review_pdf_or_skip(
+                perform_imgs_cap_ref_review, vlm_client, vlm_model, reflection_pdf
             )
 
             # Detect duplicate figures between main text and appendix
-            analysis_duplicate_figs = detect_duplicate_figures(
-                vlm_client, vlm_model, reflection_pdf
+            analysis_duplicate_figs = review_pdf_or_skip(
+                detect_duplicate_figures, vlm_client, vlm_model, reflection_pdf
             )
             print(analysis_duplicate_figs)
 
             # Get reflection_page_info
-            reflection_page_info = get_reflection_page_info(reflection_pdf, page_limit)
+            reflection_page_info = get_reflection_page_info(
+                reflection_pdf, page_limit, latex_folder
+            )
 
-            check_output = os.popen(  # TODO: should prob use subprocess instead
-                f"chktex {writeup_file} -q -n2 -n24 -n13 -n1"
-            ).read()
+            check_output = run_chktex(writeup_file)
 
             reflection_prompt = f"""
 Now let's reflect and identify any issues (including but not limited to):
@@ -1122,7 +1121,8 @@ Ensure proper citation usage:
                     with open(writeup_file, "w") as fo:
                         fo.write(final_text)
 
-                    compile_latex(latex_folder, reflection_pdf)
+                    if compile_latex(latex_folder, reflection_pdf):
+                        last_compiled_pdf = reflection_pdf
                 else:
                     print(f"No changes in reflection step {i+1}.")
                     break
@@ -1130,9 +1130,15 @@ Ensure proper citation usage:
                 print(f"No valid LaTeX code block found in reflection step {i+1}.")
                 break
             # Get new reflection_page_info
-            reflection_page_info = get_reflection_page_info(reflection_pdf, page_limit)
-            review_img_selection = perform_imgs_cap_ref_review_selection(
-                vlm_client, vlm_model, reflection_pdf, reflection_page_info
+            reflection_page_info = get_reflection_page_info(
+                reflection_pdf, page_limit, latex_folder
+            )
+            review_img_selection = review_pdf_or_skip(
+                perform_imgs_cap_ref_review_selection,
+                vlm_client,
+                vlm_model,
+                reflection_pdf,
+                reflection_page_info,
             )
             img_reflection_prompt = f"""Now let's reflect on
 The following figures are currently used in the paper: {sorted(used_figs)}
@@ -1189,7 +1195,8 @@ If you believe you are done with reflection, simply say: "I am done"."""
                     with open(writeup_file, "w") as fo:
                         fo.write(final_text)
 
-                    compile_latex(latex_folder, reflection_pdf)
+                    if compile_latex(latex_folder, reflection_pdf):
+                        last_compiled_pdf = reflection_pdf
                 else:
                     print(f"No changes in reflection step {i+1}.")
                     break
@@ -1201,10 +1208,13 @@ If you believe you are done with reflection, simply say: "I am done"."""
         # Save PDF with reflection
 
         # Get new reflection_page_info
-        reflection_page_info = get_reflection_page_info(reflection_pdf, page_limit)
+        reflection_page_info = get_reflection_page_info(
+            reflection_pdf, page_limit, latex_folder
+        )
 
-        final_reflection_prompt = """{reflection_page_info}
-USE MINIMAL EDITS TO OPTIMIZE THE PAGE LIMIT USAGE."""
+        final_reflection_prompt = f"""{reflection_page_info}
+USE MINIMAL EDITS TO OPTIMIZE THE PAGE LIMIT USAGE.
+Return the entire revised LaTeX file in full, in triple backticks with 'latex' syntax highlighting."""
         reflection_response, msg_history = get_response_from_llm(
             prompt=final_reflection_prompt,
             client=big_client,
@@ -1219,8 +1229,6 @@ USE MINIMAL EDITS TO OPTIMIZE THE PAGE LIMIT USAGE."""
         )
         # Compile current version before reflection
         print(f"[green]Compiling PDF for reflection final page limit...[/green]")
-
-        print(f"reflection step {i+1}")
 
         reflection_code_match = re.search(
             r"```latex(.*?)```", reflection_response, re.DOTALL
@@ -1244,6 +1252,17 @@ USE MINIMAL EDITS TO OPTIMIZE THE PAGE LIMIT USAGE."""
                 compile_latex(latex_folder, reflection_pdf)
             else:
                 print(f"No changes in reflection page step.")
+        else:
+            print("No valid LaTeX code block found in the final page-limit step.")
+
+        if not osp.exists(reflection_pdf) and last_compiled_pdf and osp.exists(
+            last_compiled_pdf
+        ):
+            print(
+                f"WARNING: the final page-limit step produced no PDF; using the latest "
+                f"compiled reflection PDF {last_compiled_pdf} as {reflection_pdf}."
+            )
+            shutil.copy(last_compiled_pdf, reflection_pdf)
 
         return osp.exists(reflection_pdf)
 

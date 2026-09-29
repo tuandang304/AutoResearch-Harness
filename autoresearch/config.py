@@ -34,6 +34,24 @@ def validate_config(config):
     for section in ("search", "multi_seed_eval", "stages"):
         if not isinstance(agent.get(section), dict):
             raise ValueError(f"agent.{section} must be a mapping")
+    seed_stages = agent["multi_seed_eval"].get("stages", [1, 2, 3, 4])
+    if not isinstance(seed_stages, list) or any(
+        isinstance(s, bool) or s not in (1, 2, 3, 4) for s in seed_stages
+    ):
+        raise ValueError("agent.multi_seed_eval.stages must be a list of stage numbers 1-4")
+    support = execution.get("support_files") or []
+    if not isinstance(support, list) or not all(isinstance(p, str) for p in support):
+        raise ValueError("exec.support_files must be a list of file paths")
+    names = [Path(p).name for p in support]
+    if len(set(names)) != len(names):
+        raise ValueError("exec.support_files must have distinct file names")
+    for path in support:
+        if not Path(path).is_file():
+            raise ValueError(f"exec.support_files: {path} is not a file")
+        if Path(path).stat().st_size > 1 << 20:
+            raise ValueError(f"exec.support_files: {path} is larger than 1 MB")
+        if Path(path).name in ("runfile.py", "postprocess.py", "working", "input"):
+            raise ValueError(f"exec.support_files: {path} shadows a workspace name")
     counts = {
         "worker_timeout": agent.get("worker_timeout", 7200),
         "num_workers": agent.get("num_workers"),
@@ -126,6 +144,13 @@ def load_run_config(path, provider=None, backend=None, workers=None, orchestrato
     if not isinstance(config, dict):
         raise ValueError("Configuration must be a YAML mapping")
     config = copy.deepcopy(config)
+    execution = config.get("exec")
+    if isinstance(execution, dict) and isinstance(execution.get("support_files"), list):
+        # Relative to the configuration file (a project's own directory).
+        execution["support_files"] = [
+            str((Path(path).parent / p).resolve()) if isinstance(p, str) else p
+            for p in execution["support_files"]
+        ]
     selected = llm_config or os.environ.get("AUTORESEARCH_LLM_CONFIG")
     if selected is None and config.get("llm_config") is not None:
         if not isinstance(config["llm_config"], str):

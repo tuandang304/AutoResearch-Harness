@@ -1,0 +1,11 @@
+[
+  {
+    "Name": "small_mlp_dropout",
+    "Title": "Does dropout help a small classifier with scarce noisy data?",
+    "Short Hypothesis": "Dropout improves validation accuracy when a small MLP trains on scarce noisy data.",
+    "Related Work": "Dropout is an established regularization method. Verify relevant literature before interpreting this illustrative study as a research contribution.",
+    "Abstract": "Compare a small two-layer MLP with and without dropout on synthetic two-dimensional classification data using fixed splits and multiple random seeds.",
+    "Experiments": ["Generate data locally without downloads.", "Train for at most 20 epochs per variant and finish each script in under five minutes.", "Report accuracy, runtime and variation across seeds; retain negative results."],
+    "Risk Factors and Limitations": ["Synthetic results do not establish real-world effectiveness.", "This example validates the pipeline, not scientific novelty."]
+  }
+]

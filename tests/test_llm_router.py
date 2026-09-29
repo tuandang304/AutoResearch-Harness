@@ -356,7 +356,7 @@ class RouterTests(unittest.TestCase):
         before = dict(os.environ)
         files_before = set(self.directory.rglob("*"))
         with contextlib.redirect_stdout(output), patch("autoresearch.llm_router.State", side_effect=AssertionError("dry run opened state")):
-            status = main(["--project", str(ROOT / "projects/regularization"),
+            status = main(["--project", str(ROOT / "tests/fixtures/project"),
                            "--output-dir", str(self.directory / "runs"), "--dry-run"])
         self.assertEqual(status, 0)
         resolved = json.loads(output.getvalue())
