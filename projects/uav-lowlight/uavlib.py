@@ -31,7 +31,8 @@ import zlib
 
 import numpy as np
 
-__version__ = "1.0"
+__version__ = "1.1"
+SYNTH_VERSION = "1.0"  # synthetic-dark evaluation sets (unchanged since 1.0)
 
 CACHE = Path(os.environ.get("UAV_CACHE", "/content/cache/visdrone"))
 RUNS = Path(os.environ.get("UAV_RUNS", "/content/cache/runs"))
@@ -48,6 +49,10 @@ AREA_BINS = {"all": [0, 1e10], "tiny": [0, 16 ** 2], "small": [16 ** 2, 32 ** 2]
              "small_all": [0, 32 ** 2], "medium": [32 ** 2, 96 ** 2], "large": [96 ** 2, 1e10]}
 ENHANCEMENTS = ("none", "gamma", "clahe")
 THREADS = max(4, 2 * (os.cpu_count() or 2))
+# pycocotools is single-threaded Python: evaluations run in subprocesses, overlapped
+# with GPU prediction (each needs a few GB of RAM for the larger groups)
+EVAL_WORKERS = int(os.environ.get("UAV_EVAL_WORKERS", max(1, min(6, (os.cpu_count() or 2) - 2))))
+STATE_GROUPS = ("night_test", "twilight_test")  # groups whose bootstrap state is kept
 
 
 def log(message):
@@ -194,8 +199,8 @@ def manifest_hash():
 
 
 def _synthetic_eval_set(data, base, name):
-    out = data.cache / f"{name}_v{__version__}"
-    marker = _step(f"{name}_v{__version__}", data.cache)
+    out = data.cache / f"{name}_v{SYNTH_VERSION}"
+    marker = _step(f"{name}_v{SYNTH_VERSION}", data.cache)
     records = [dict(r, path=str(out / Path(r["path"]).name), key=f"{name}/{Path(r['path']).name}")
                for r in data.groups[base]]
     if not marker.exists():
@@ -435,13 +440,15 @@ def train(data_yaml, name, epochs, imgsz, seed, batch=16, weights="yolo11s.pt", 
 # ------------------------------------------------------------ evaluation
 
 
-def predict(weights, records, imgsz, method="none", batch=16, conf=0.001, max_det=1000):
-    """Detections per record as arrays (x, y, w, h, score, class) at original resolution."""
+def predict(weights, records, imgsz, method="none", batch=16, conf=0.001, max_det=500):
+    """Detections per record as arrays (x, y, w, h, score, class) at original
+    resolution; at most max_det per image (500, the VisDrone convention).
+    `weights` is a path or an already loaded YOLO model."""
     from ultralytics import YOLO
     import torch
 
     cv2 = _cv2()
-    model = YOLO(weights)
+    model = YOLO(weights) if isinstance(weights, (str, Path)) else weights
     device = 0 if torch.cuda.is_available() else "cpu"
     out = []
     for start in range(0, len(records), batch):
@@ -599,28 +606,72 @@ def paired_clip_bootstrap(state_x, state_y, area="small_all", n=1000, seed=0):
                 n_boot=n, n_clips=len(unique), area=area)
 
 
+def _coco_eval_subprocess(records, dets, keep_state):
+    """coco_eval in a fresh interpreter, so several run in parallel. A fresh process
+    (not fork) is safe after CUDA initialisation and never re-runs the caller."""
+    import pickle
+    import subprocess
+    import sys
+    import tempfile
+
+    tmp = RUNS / "eval_tmp"
+    tmp.mkdir(parents=True, exist_ok=True)
+    fd, inp = tempfile.mkstemp(dir=tmp, suffix=".in.pkl")
+    os.close(fd)
+    outp = inp.replace(".in.pkl", ".out.pkl")
+    slim = [{k: r[k] for k in ("width", "height", "boxes", "labels", "ignore", "clip")} for r in records]
+    code = ("import pickle, sys; sys.path.insert(0, sys.argv[3]); import uavlib; "
+            "r, d, k = pickle.load(open(sys.argv[1], 'rb')); m, s = uavlib.coco_eval(r, d); "
+            "pickle.dump((m, s if k else None), open(sys.argv[2], 'wb'), protocol=4)")
+    try:
+        with open(inp, "wb") as f:
+            pickle.dump((slim, dets, keep_state), f, protocol=4)
+        done = subprocess.run([sys.executable, "-c", code, inp, outp, str(Path(__file__).resolve().parent)],
+                              capture_output=True, text=True)
+        if done.returncode != 0:
+            raise RuntimeError(f"coco_eval subprocess failed: {done.stderr[-2000:]}")
+        with open(outp, "rb") as f:
+            return pickle.load(f)
+    finally:
+        for path in (inp, outp):
+            Path(path).unlink(missing_ok=True)
+
+
 def evaluate(weights, data, groups, imgsz, methods=("none",), night_methods=ENHANCEMENTS,
-             batch=16, keep_state=True):
+             batch=16, state_groups=STATE_GROUPS):
     """Evaluate one model on groups; night_test and twilight_test also get every
-    method in night_methods. Returns {group: {method: {"metrics", "state"}}}."""
-    out = {}
-    for group in groups:
-        records = data.groups[group]
-        chosen = night_methods if group in ("night_test", "twilight_test") else methods
-        out[group] = {}
-        for method in chosen:
-            t0 = time.time()
-            dets = predict(weights, records, imgsz, method, batch=batch)
-            metrics, state = coco_eval(records, dets)
-            metrics["seconds"] = round(time.time() - t0, 1)
-            out[group][method] = {"metrics": metrics, "state": state if keep_state else None}
+    method in night_methods. Returns {group: {method: {"metrics", "state"}}}; the
+    bootstrap state is kept for state_groups only (None elsewhere).
+
+    Prediction runs on the GPU while earlier COCO evaluations run in up to
+    EVAL_WORKERS parallel subprocesses."""
+    from ultralytics import YOLO
+
+    model = YOLO(weights)
+    jobs = []
+    t_start = time.time()
+    with ThreadPoolExecutor(EVAL_WORKERS) as pool:
+        for group in groups:
+            records = data.groups[group]
+            chosen = night_methods if group in ("night_test", "twilight_test") else methods
+            for method in chosen:
+                t0 = time.time()
+                dets = predict(model, records, imgsz, method, batch=batch)
+                jobs.append((group, method, round(time.time() - t0, 1),
+                             pool.submit(_coco_eval_subprocess, records, dets, group in state_groups)))
+        out = {}
+        for group, method, predict_seconds, future in jobs:
+            metrics, state = future.result()
+            metrics["predict_seconds"] = predict_seconds
+            out.setdefault(group, {})[method] = {"metrics": metrics, "state": state}
             log(f"{group}/{method}: AP {metrics['AP']['all']:.4f} "
-                f"AP_small_all {metrics['AP']['small_all']:.4f} ({metrics['seconds']}s)")
+                f"AP_small_all {metrics['AP']['small_all']:.4f} (predict {predict_seconds}s)")
+    log(f"evaluated {len(jobs)} group/enhancement pairs in {time.time() - t_start:.0f}s")
     return out
 
 
 def strip_states(result):
-    """Metrics only (for np.save); bootstrap states are large."""
+    """Metrics only (for np.save); bootstrap states are large and not saved."""
     return {g: {m: v["metrics"] for m, v in methods.items()} for g, methods in result.items()}
 
 

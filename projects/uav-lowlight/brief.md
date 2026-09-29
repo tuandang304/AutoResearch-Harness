@@ -68,7 +68,8 @@ It is kept as a stage-4 ablation. The light-pool variant multiplies by a smooth
 map with ambient level k plus 2-8 Gaussian pools (0.051/0.078/0.135).
 
 **Evaluation** (`uavlib.coco_eval`): pycocotools COCO AP (IoU 0.50:0.95) and AP50 at
-original resolution, maxDets 500 (as in VisDrone), per area bin: tiny < 16^2,
+original resolution, at most 500 detections per image (conf >= 0.001) and maxDets 500
+(as in VisDrone), per area bin: tiny < 16^2,
 small 16^2-32^2, small_all < 32^2 (primary), medium 32^2-96^2, large. VisDrone
 ignored regions and "others" are crowd regions for every class, so detections in
 them are neither true nor false positives. Test-time enhancement: none; gamma
