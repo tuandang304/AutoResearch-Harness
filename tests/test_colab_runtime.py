@@ -1,6 +1,7 @@
 import ast
 import json
 import os
+import signal
 from pathlib import Path
 import stat
 import sys
@@ -16,7 +17,11 @@ from autoresearch.colab_runtime import (
 )
 from autoresearch.config import validate_config
 from ai_scientist.treesearch.interpreter import ExecutionResult
-from ai_scientist.treesearch.remote_interpreter import RemoteExecutorUnavailable, RemoteInterpreter
+from ai_scientist.treesearch.remote_interpreter import (
+    RemoteExecutorUnavailable,
+    RemoteInterpreter,
+    SessionStatusUnknown,
+)
 
 FAKE = Path(__file__).resolve().parent / "fixtures" / "fake_colab.py"
 # Fails with a CUDA OOM on the tiers listed in OOM_ON, prints its tier otherwise.
@@ -336,6 +341,20 @@ class PoolTests(unittest.TestCase):
         self.assertEqual(sum(" -f " in c for c in self.calls() if c.startswith("exec")), 2)
         self.assertEqual(pool.load()["sessions"]["T4"]["stop_reason"], "tunnel-unreachable")
         self.assertEqual(self.vm_sessions(), [])
+
+    def test_unknown_session_status_never_replaces_a_running_vm(self):
+        pool = self.managed()
+        self.assertIsNone(self.run_job("print('first')").exc_type)
+        server = json.loads((self.dir / "state.json").read_text())["sessions"]
+        os.killpg(next(iter(server.values()))["server_pid"], signal.SIGTERM)  # tunnel gone
+        (self.dir / "status_fails").touch()
+        with self.assertRaises(SessionStatusUnknown):
+            pool.ensure("T4")
+        self.assertEqual(sum(c.startswith("new") for c in self.calls()), 1)
+        (self.dir / "status_fails").unlink()
+        pool.ensure("T4")  # the VM still exists: only the server/tunnel restarts
+        self.assertEqual(sum(c.startswith("new") for c in self.calls()), 1)
+        self.assertIsNone(self.run_job("print('again')").exc_type)
 
     def background_job(self, code, results, name):
         thread = threading.Thread(target=lambda: results.__setitem__(name, self.run_job(code)))

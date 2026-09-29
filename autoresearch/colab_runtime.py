@@ -54,6 +54,7 @@ import requests
 
 from ai_scientist.treesearch.remote_interpreter import (
     RemoteExecutorUnavailable,
+    SessionStatusUnknown,
     _config_path,
 )
 
@@ -412,9 +413,21 @@ class ColabCLI:
         return float(balance.group(1)), float(rate.group(1)) if rate else 0.0
 
     def session_exists(self, name):
-        _, out, err = self.run("status", "-s", name, timeout=60, check=False)
+        """True/False from `colab status`; SessionStatusUnknown when it gives no
+        verdict, so a network error never replaces a VM that is still running."""
+        try:
+            code, out, err = self.run("status", "-s", name, timeout=60, check=False)
+        except RemoteExecutorUnavailable as exc:
+            if shutil.which(self.binary) is None:
+                raise
+            raise SessionStatusUnknown(f"colab status -s {name}: {exc}") from exc
         text = out + err
-        return f"[{name}]" in text and "not found" not in text.lower()
+        if "not found" in text.lower():
+            return False
+        if f"[{name}]" in text:
+            return True
+        raise SessionStatusUnknown(
+            f"colab status -s {name} gave no verdict (exit {code}): {redact(text).strip()[-300:]}")
 
     def stop(self, name):
         self.run("stop", "-s", name, timeout=120, check=False)

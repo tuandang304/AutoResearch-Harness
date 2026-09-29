@@ -8,6 +8,17 @@ import backoff
 
 from ai_scientist.tools.base_tool import BaseTool
 
+# Bound every Semantic Scholar call: a per-request timeout plus a finite retry
+# budget, so a stalled connection or persistent 429s cannot hang a run forever.
+S2_REQUEST_TIMEOUT = 30  # seconds per HTTP request
+S2_MAX_TRIES = 8
+S2_MAX_TIME = 300  # seconds across all retries of one search
+S2_RETRY_EXCEPTIONS = (
+    requests.exceptions.HTTPError,
+    requests.exceptions.ConnectionError,
+    requests.exceptions.Timeout,
+)
+
 
 def on_backoff(details: Dict) -> None:
     print(
@@ -51,7 +62,9 @@ class SemanticScholarSearchTool(BaseTool):
 
     @backoff.on_exception(
         backoff.expo,
-        (requests.exceptions.HTTPError, requests.exceptions.ConnectionError),
+        S2_RETRY_EXCEPTIONS,
+        max_tries=S2_MAX_TRIES,
+        max_time=S2_MAX_TIME,
         on_backoff=on_backoff,
     )
     def search_for_papers(self, query: str) -> Optional[List[Dict]]:
@@ -70,6 +83,7 @@ class SemanticScholarSearchTool(BaseTool):
                 "limit": self.max_results,
                 "fields": "title,authors,venue,year,abstract,citationCount",
             },
+            timeout=S2_REQUEST_TIMEOUT,
         )
         print(f"Response Status Code: {rsp.status_code}")
         print(f"Response Content: {rsp.text[:500]}")
@@ -99,7 +113,11 @@ Abstract: {paper.get("abstract", "No abstract available.")}"""
 
 
 @backoff.on_exception(
-    backoff.expo, requests.exceptions.HTTPError, on_backoff=on_backoff
+    backoff.expo,
+    S2_RETRY_EXCEPTIONS,
+    max_tries=S2_MAX_TRIES,
+    max_time=S2_MAX_TIME,
+    on_backoff=on_backoff,
 )
 def search_for_papers(query, result_limit=10) -> Union[None, List[Dict]]:
     S2_API_KEY = os.getenv("S2_API_KEY")
@@ -122,6 +140,7 @@ def search_for_papers(query, result_limit=10) -> Union[None, List[Dict]]:
             "limit": result_limit,
             "fields": "title,authors,venue,year,abstract,citationStyles,citationCount",
         },
+        timeout=S2_REQUEST_TIMEOUT,
     )
     print(f"Response Status Code: {rsp.status_code}")
     print(

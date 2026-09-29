@@ -231,6 +231,14 @@ class RemoteIntegrationTests(unittest.TestCase):
             self.assertIn("absent", "".join(result.term_out))
             self.assertFalse((working / "stale").exists())
             self.assertEqual((working / "result").read_text(), "ok")
+            result = interpreter.run(
+                "from concurrent.futures import ProcessPoolExecutor\n"
+                "def square(x):\n    return x * x\n"
+                "with ProcessPoolExecutor(2) as pool:\n"
+                "    print('squares', sum(pool.map(square, range(4))))\n"
+            )
+            self.assertIsNone(result.exc_type, "".join(result.term_out))
+            self.assertIn("squares 14", "".join(result.term_out))
             result = interpreter.run("raise ValueError('expected')")
             self.assertEqual(result.exc_type, "ValueError")
             self.assertIsNone(interpreter.run("import sys; sys.exit(0)").exc_type)

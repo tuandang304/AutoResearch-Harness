@@ -42,6 +42,14 @@ class RemoteExecutorUnavailable(RuntimeError):
     pass
 
 
+class SessionStatusUnknown(RemoteExecutorUnavailable):
+    """The Colab CLI could not say whether a VM exists (network or CLI error).
+
+    The VM and its jobs may still be running, so callers wait and ask again
+    instead of provisioning a replacement.
+    """
+
+
 def _config_path() -> Path:
     if os.environ.get("AI_SCIENTIST_REMOTE_CONFIG"):
         return Path(os.environ["AI_SCIENTIST_REMOTE_CONFIG"])
@@ -157,15 +165,17 @@ class RemoteInterpreter:
                 failing_since, recovered_at or failing_since
             ) >= RECOVER_AFTER:
                 recovered_at = time.monotonic()
-                self._recover()
-                continue
+                if self._try_recover():
+                    continue
             try:
                 try:
                     url, token = self._config()
                 except RemoteExecutorUnavailable:
                     if not managed:
                         raise
-                    self._recover()  # the tier's VM was stopped (idle) or lost
+                    # the tier's VM was stopped (idle) or lost
+                    if not self._try_recover():
+                        raise requests.ConnectionError("Colab session status unknown")
                     url, token = self._config()
                 resp = requests.request(
                     method,
@@ -210,6 +220,15 @@ class RemoteInterpreter:
         from autoresearch.colab_runtime import managed_pool
 
         self._executor = managed_pool().ensure(self._replica)
+
+    def _try_recover(self) -> bool:
+        """_recover, but False (retry later) when the VM's status is unknown."""
+        try:
+            self._recover()
+            return True
+        except SessionStatusUnknown as exc:
+            logger.warning("%s; not replacing the VM, retrying later", exc)
+            return False
 
     # ------------------------------------------------------------- workspace
 
@@ -264,8 +283,8 @@ class RemoteInterpreter:
         while True:
             try:
                 placed = pool.acquire(requested, exclusive=exclusive)
-            except colab.NoTierAvailable as exc:
-                # Colab capacity; budget/release errors are not retried.
+            except (colab.NoTierAvailable, SessionStatusUnknown) as exc:
+                # Colab capacity or a CLI/network blip; budget/release errors are not retried.
                 if time.monotonic() >= wait_until:
                     raise
                 logger.warning("%s; retrying in 60s", exc)

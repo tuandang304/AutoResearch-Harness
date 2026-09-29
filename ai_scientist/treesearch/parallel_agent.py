@@ -713,6 +713,7 @@ class MinimalAgent:
                 + ". "
                 + hyperparam_idea.description
             ),
+            "Research idea": self.task_desc,
             "Base code you are working on": wrap_code(parent_node.code),
             "Instructions": {},
         }
@@ -720,6 +721,8 @@ class MinimalAgent:
             "Implementation guideline": [
                 "The code should be a single-file python program that is self-contained and can be executed as-is.",
                 "No parts of the code should be skipped, don't terminate the code execution before finishing the script.",
+                "Follow the research idea's constraints (data, splits, metrics, budgets) unless this task explicitly changes them.",
+                f"Be aware of the running time of the code, it should complete within {humanize.naturaldelta(self.cfg.exec.timeout)}.",
                 "Data saving requirements:",
                 "- Save all plottable data (metrics, losses, predictions, etc.) as numpy arrays using np.save()",
                 "- Use the following naming convention for saved files:",
@@ -760,6 +763,7 @@ class MinimalAgent:
                 + ". "
                 + ablation_idea.description
             ),
+            "Research idea": self.task_desc,
             "Base code you are working on": wrap_code(parent_node.code),
             "Instructions": {},
         }
@@ -767,6 +771,8 @@ class MinimalAgent:
             "Implementation guideline": [
                 "The code should be a single-file python program that is self-contained and can be executed as-is.",
                 "No parts of the code should be skipped, don't terminate the code execution before finishing the script.",
+                "Follow the research idea's constraints (data, splits, metrics, budgets) unless this task explicitly changes them.",
+                f"Be aware of the running time of the code, it should complete within {humanize.naturaldelta(self.cfg.exec.timeout)}.",
                 "Data saving requirements:",
                 "- Save all plottable data (metrics, losses, predictions, etc.) as numpy arrays using np.save()",
                 "- Use the following naming convention for saved files:",
@@ -2010,7 +2016,9 @@ class ParallelAgent:
                 "You should first check if simply training longer (more epochs) improves the performance."
                 "Then try tuning common hyperparameters such as learning rate, batch size, etc."
                 "Only propose algorithm-specific and/or model-specific hyperparameters after you have tried the above."
+                " If the research idea's experiment plan says what to tune in this stage, follow it instead."
             ),
+            "Research idea": self.task_desc,
             "Base code you are working on": wrap_code(self.best_stage1_node.code),
             "Previous Hyperparam Tuning Attempts": {
                 "Has been tried": tried if tried else "Nothing has been tried yet.",
@@ -2069,7 +2077,9 @@ class ParallelAgent:
                 "You are an AI researcher conducting ablation studies. "
                 "Based on the current implementation and previous ablations (if any), "
                 "propose ONE new ablation study that tests a different aspect of the model."
+                " If the research idea's experiment plan lists ablations, propose the next one from that list."
             ),
+            "Research idea": self.task_desc,
             "Base code you are working on": wrap_code(self.best_stage3_node.code),
             "Previous Ablations": {
                 "Has been tried": (

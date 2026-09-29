@@ -167,6 +167,15 @@ class AgentManager:
                 - Conduct systematic component analysis that reveals the contribution of each part
                 - Use the same datasets you used from the previous stage""",
         }
+        # A study may replace the generic goals (e.g. to keep its own datasets):
+        # "Stage Goals": {"1": "...", "2": "...", "3": "...", "4": "..."}
+        overrides = self.task_desc.get("Stage Goals") or {}
+        if not isinstance(overrides, dict) or not set(map(str, overrides)) <= {"1", "2", "3", "4"}:
+            raise ValueError('"Stage Goals" must map stage numbers 1-4 to goal text')
+        for number, goals in overrides.items():
+            if not isinstance(goals, str) or not goals.strip():
+                raise ValueError(f'"Stage Goals" for stage {number} must be non-empty text')
+            self.main_stage_goals[int(number)] = goals
         # Create initial stage
         self._create_initial_stage()
 
@@ -218,26 +227,27 @@ Your research idea:\n\n
     def _curate_task_desc(self, stage: Stage) -> str:
         task_desc = self._get_task_desc_str()
 
-        if stage.name.startswith("3_"):
-            if isinstance(self.task_desc["Experiments"], list):
-                if isinstance(self.task_desc["Experiments"][0], str):
-                    experiment_str = "\n".join(self.task_desc["Experiments"])
-                elif isinstance(self.task_desc["Experiments"][0], dict):
-                    experiment_str = "\n".join(
-                        [
-                            f"{k}: {v}"
-                            for d in self.task_desc["Experiments"]
-                            for k, v in d.items()
-                        ]
-                    )
-            elif isinstance(self.task_desc["Experiments"], str):
-                experiment_str = self.task_desc["Experiments"]
-            else:
-                raise ValueError(
-                    f"Experiments is not a list or string: {self.task_desc['Experiments']}"
+        # The plan labels its steps by stage, so every stage sees it (stages 2
+        # and 4 otherwise invent tuning and ablations from the code alone).
+        if isinstance(self.task_desc["Experiments"], list):
+            if isinstance(self.task_desc["Experiments"][0], str):
+                experiment_str = "\n".join(self.task_desc["Experiments"])
+            elif isinstance(self.task_desc["Experiments"][0], dict):
+                experiment_str = "\n".join(
+                    [
+                        f"{k}: {v}"
+                        for d in self.task_desc["Experiments"]
+                        for k, v in d.items()
+                    ]
                 )
-            task_desc += "Experiment Plan: " + experiment_str + "\n"
-        elif stage.name.startswith("4_"):
+        elif isinstance(self.task_desc["Experiments"], str):
+            experiment_str = self.task_desc["Experiments"]
+        else:
+            raise ValueError(
+                f"Experiments is not a list or string: {self.task_desc['Experiments']}"
+            )
+        task_desc += "Experiment Plan: " + experiment_str + "\n"
+        if stage.name.startswith("4_"):
             if isinstance(self.task_desc["Risk Factors and Limitations"], list):
                 risk_factors_str = "\n".join(
                     self.task_desc["Risk Factors and Limitations"]

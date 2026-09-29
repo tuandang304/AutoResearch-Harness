@@ -108,14 +108,20 @@ def validate_spec(spec):
 
 
 RUNNER_SOURCE = r"""
-import json, os, sys, traceback
+import json, os, sys, traceback, types
 fname = sys.argv[1]
 exc_file = sys.argv[2]
 sys.path.append(os.getcwd())
 with open(fname) as f:
     code = f.read()
+# Run the script as the real __main__ module so functions it defines can be
+# pickled by multiprocessing and concurrent.futures process pools.
+main = types.ModuleType("__main__")
+main.__file__ = os.path.abspath(fname)
+main.__builtins__ = __builtins__
+sys.modules["__main__"] = main
 try:
-    exec(compile(code, fname, "exec"), {"__name__": "__main__", "__file__": fname})
+    exec(compile(code, fname, "exec"), main.__dict__)
 except BaseException as e:
     if isinstance(e, SystemExit) and e.code in (None, 0):
         raise

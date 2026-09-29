@@ -37,8 +37,64 @@ def remove_accents_and_clean(s):
     return ascii_str
 
 
-def compile_latex(cwd, pdf_file, timeout=30):
+# Per-command LaTeX timeout (seconds). Figure-heavy papers can exceed 30 s.
+LATEX_TIMEOUT = 120
+
+CHKTEX_MISSING_NOTE = "chktex is not installed; LaTeX lint checks were skipped."
+_chktex_missing_warned = False
+
+
+def run_chktex(tex_file, timeout=60):
+    """Return chktex output for tex_file, or a note saying the check was skipped."""
+    global _chktex_missing_warned
+    chktex = shutil.which("chktex")
+    if chktex is None:
+        if not _chktex_missing_warned:
+            print(
+                "WARNING: chktex was not found on PATH; LaTeX lint checks are "
+                "skipped. Install chktex (e.g. the TeX Live chktex package) to enable them."
+            )
+            _chktex_missing_warned = True
+        return CHKTEX_MISSING_NOTE
+    try:
+        result = subprocess.run(
+            [chktex, tex_file, "-q", "-n2", "-n24", "-n13", "-n1"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        return f"chktex timed out after {timeout} seconds."
+    return result.stdout
+
+
+def remove_stale_filecontents(cwd, tex_name="template.tex"):
+    """Delete files that tex_name regenerates via filecontents.
+
+    LaTeX's filecontents environment never overwrites an existing file, so a
+    references.bib left by an earlier compile would hide citations added later.
+    """
+    try:
+        with open(osp.join(cwd, tex_name), "r", encoding="utf-8", errors="ignore") as f:
+            tex = f.read()
+    except OSError:
+        return
+    pattern = r"\\begin\{filecontents\*?\}(?:\[[^\]]*\])?\{([^}]+)\}"
+    for name in re.findall(pattern, tex):
+        name = name.strip()
+        path = osp.join(cwd, name)
+        if name == osp.basename(name) and osp.isfile(path):
+            os.remove(path)
+
+
+def compile_latex(cwd, pdf_file, timeout=LATEX_TIMEOUT):
+    """Compile template.tex in cwd and move the PDF to pdf_file.
+
+    Returns True when a PDF was produced, False otherwise.
+    """
     print("GENERATING LATEX")
+    remove_stale_filecontents(cwd)
 
     commands = [
         ["pdflatex", "-interaction=nonstopmode", "template.tex"],
@@ -78,9 +134,11 @@ def compile_latex(cwd, pdf_file, timeout=30):
         print("Failed to rename PDF.")
         print("EXCEPTION in compile_latex while moving PDF:")
         print(traceback.format_exc())
+        return False
+    return True
 
 
-def detect_pages_before_impact(latex_folder, timeout=30):
+def detect_pages_before_impact(latex_folder, timeout=LATEX_TIMEOUT):
     """
     Temporarily copy the latex folder, compile, and detect on which page
     the phrase "Impact Statement" appears.
@@ -237,7 +295,7 @@ This JSON will be automatically parsed, so ensure the format is precise."""
 
     try:
         text, msg_history = get_response_from_llm(
-            msg=citation_first_prompt_template.format(
+            prompt=citation_first_prompt_template.format(
                 current_round=current_round + 1,
                 total_rounds=total_rounds,
                 Idea=idea_text,
@@ -287,7 +345,7 @@ This JSON will be automatically parsed, so ensure the format is precise."""
 
     try:
         text, msg_history = get_response_from_llm(
-            msg=citation_second_prompt_template.format(
+            prompt=citation_second_prompt_template.format(
                 papers=papers_str,
                 current_round=current_round + 1,
                 total_rounds=total_rounds,
@@ -645,7 +703,7 @@ def perform_writeup(
         )
 
         response, msg_history = get_response_from_llm(
-            msg=combined_prompt,
+            prompt=combined_prompt,
             client=big_client,
             model=big_client_model,
             system_message=big_model_system_message,
@@ -690,9 +748,7 @@ def perform_writeup(
             else:
                 reflection_page_info = "\nCould not detect 'Impact Statement' page (compilation or detection failed).\n"
 
-            check_output = os.popen(
-                f"chktex {writeup_file} -q -n2 -n24 -n13 -n1"
-            ).read()
+            check_output = run_chktex(writeup_file)
 
             reflection_prompt = f"""
 Now let's reflect and identify any issues (including but not limited to):
@@ -716,7 +772,7 @@ If you believe you are done, simply say: "I am done".
 """
 
             reflection_response, msg_history = get_response_from_llm(
-                msg=reflection_prompt,
+                prompt=reflection_prompt,
                 client=big_client,
                 model=big_client_model,
                 system_message=big_model_system_message,
