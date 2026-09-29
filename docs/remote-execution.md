@@ -81,3 +81,126 @@ rest of its runtime.
 and increase it only after checking GPU memory use. The notebook monitor reports
 health and exits if its server or tunnel process stops. It does not defeat
 Colab idle limits or extend the runtime's lifetime.
+
+## Colab CLI provisioning
+
+`autoresearch/colab_runtime.py` replaces the manual notebook steps with the
+[Colab CLI](https://pypi.org/project/google-colab-cli/) (checked with 0.7.4).
+It uploads the same `colab_server.py` and `workspace.py`, starts the server and a
+quick tunnel from a `colab exec` bootstrap, and writes the executor file
+atomically with mode 0600. The HTTP protocol, job semantics and limits above are
+unchanged. Authenticate the CLI first; `colab usage` must print a balance.
+
+A run owns a pool: one state file and at most one VM per compute tier. Enable
+it per project (a project `config.yaml` replaces `tiers` as a whole):
+
+```yaml
+exec:
+  backend: colab
+  colab:
+    auto_provision: true
+    selection: llm          # or fixed: every job on `gpu`
+    gpu: T4                 # default tier (fixed mode: a fallback list such as [L4, T4])
+    tiers:
+      cpu:  {rate: 0.08, use: "no GPU: numpy/sklearn, tiny models"}
+      T4:   {rate: 1.19, memory_gb: 15, use: "small models, fp16"}
+      L4:   {rate: 1.71, memory_gb: 22, use: "mid-size models, bf16"}
+      A100: {rate: 5.40, memory_gb: 40, idle_stop_minutes: 10, use: "large models"}
+    max_sessions: 2
+    max_upgrade_ratio: 1.5
+    escalate_on_oom: true
+    idle_stop_minutes: 30
+    max_compute_units: 30
+    min_balance: 5
+```
+
+### Model-selected compute
+
+With `selection: llm`, the draft, debug, improve, hyperparameter and ablation
+prompts include a "Compute selection" section. It lists each tier's memory, rate
+and intended use, plus the remaining run budget. The code model declares its
+choice on the first line of the script:
+
+```python
+# COMPUTE: L4  # ResNet-50 at batch 256 exceeds a T4's 15 GB
+```
+
+The declaration is a comment and changes nothing when run locally. Routing:
+
+| Situation | Tier used |
+|---|---|
+| Declared tier on the menu | That tier's VM, created on first use |
+| No or unknown declaration | The node's previous tier (metric parsing, plotting), else `gpu` |
+| Seed evaluations | The parent's code, so the parent's declaration |
+| Tier refused by Colab | Pricier tiers within `max_upgrade_ratio` of its rate (T4 → L4 at 1.44×), then cheaper GPU tiers; never cpu for a GPU request |
+| No tier can be allocated | Retried every 60 s within `remote_wait_minutes`, then `NoTierAvailable` stops the run |
+| CUDA out of memory | Re-run once, from the same uploaded snapshot, on the next larger tier; a second OOM goes to the model as a normal failure |
+
+Each job's output starts with a line such as
+`[compute] Requested L4 (reason); ran on L4 (NVIDIA L4, 23034 MiB) in 312s, ~0.148 compute units.`
+The feedback and debug prompts therefore see what the choice cost. Every job is
+also recorded in the run's `compute.jsonl`: declared tier, reason, tier used,
+GPU name, time, estimated units, escalation and fallback notes.
+
+The tier `rate` values order the menu and inform the model. After provisioning,
+the rate the account actually reports is stored as `measured_rate` and shown
+instead. The default GPU rates come from a third-party measurement
+([mccormickml.com](http://mccormickml.com/2024/04/23/colab-gpus-features-and-pricing/),
+March 2026), not from Google pricing. Tier `use` text is guidance for the model,
+not a measured capacity. Hardware differs between tiers, so compare run times
+across nodes only when they used the same GPU.
+
+### Cost controls
+
+| Control | Behavior |
+|---|---|
+| Preflight | Launch fails before any model call if the CLI is missing, unauthenticated or below `min_balance`. |
+| Lazy start | No VM exists until the first job for its tier. |
+| Accelerator check | Tier names are validated before `colab new` (the CLI maps unknown names to A100). After allocation, `nvidia-smi` must match the tier. Otherwise the VM is stopped and that tier is skipped for 30 minutes. |
+| Capacity refusals | A 5xx/"Service Unavailable" allocation is retried once after 20 s, then the tier is skipped for 3 minutes. Other refusals (entitlement, quota) skip it for 30 minutes. |
+| Session cap | At `max_sessions` VMs, the priciest idle one is stopped to make room. If all are busy, the job waits up to 30 minutes. |
+| Release after tree search | The launcher stops every VM before plotting, write-up and review, which need no GPU. |
+| Idle stop | The watchdog stops a VM with no running or queued jobs, or with an unreachable executor, after its tier's `idle_stop_minutes` (global default otherwise). The next job re-provisions it. |
+| Budget | Spend is the larger of the balance drop and usage rate × time, polled every five minutes. At `max_compute_units` every VM stops and later jobs fail with `RemoteExecutorUnavailable`. The balance is account-wide, so other Colab use counts too. |
+| Controller exit | The detached watchdog stops and releases every VM when the launcher process no longer exists, including after SIGKILL. |
+| Unreachable tunnel | The bootstrap waits for cloudflared to register before reporting the URL. The controller waits 3 minutes, restarts the tunnel once, then stops the VM and reports the tunnel log. |
+
+Recovery: a missing executor file (first job, after an idle stop) triggers
+provisioning immediately. An executor unreachable for 60 seconds triggers a
+reconnect of that job's tier. If its VM still exists, the running server and
+jobs are kept and only the tunnel is replaced. Otherwise a new VM is created and
+lost jobs are resubmitted as described under "Jobs and reconnection".
+Provisioning is serialized per tier across worker processes with file locks.
+
+Measured on this account with CLI 0.7.4 (without package installation): about
+90–105 seconds from request to first result, for both a CPU runtime and a T4
+(`Tesla T4, 15360 MiB`, measured 1.07 units/hour). T4 allocations were
+sometimes refused with HTTP 503 while L4 was available. For tasks of a few
+seconds, provisioning time dominates; a declared cheap tier is only worth it
+when the job is long enough, or when its VM is already up.
+
+State, executor credentials and watchdog logs are kept in `.state/colab/`
+(gitignored). The run directory receives `colab_runtime.json` (per-tier session,
+GPU, provisions, stop reasons, measured rates and the spend estimate) and
+`compute.jsonl`. Neither contains a token. The CLI's own history
+(`~/.config/colab-cli/history/`) records executed code and output. The token is
+therefore uploaded as a file and never printed. Keep
+`AI_SCIENTIST_REMOTE_URL`/`TOKEN` unset in this mode; the launcher refuses them.
+
+Standalone use, for example with the manual workflow or `--check` (fixed mode,
+one VM):
+
+```bash
+python -m autoresearch.colab_runtime up --gpu T4   # writes remote_executor.json
+python -m ai_scientist.treesearch.remote_interpreter --check
+python -m autoresearch.colab_runtime status        # balance, rate, sessions per tier
+python -m autoresearch.colab_runtime down          # stop every managed pool
+```
+
+`up` starts an idle/budget watchdog unless `--no-watchdog` is given. `down`
+without `--session` stops every managed pool that is still up, including one
+that belongs to a running launch.
+
+`colab exec` exits 0 even when remote code raises and when its timeout expires.
+Bootstrap success is therefore decided by the printed `AISCI_URL` marker, not by
+the exit code. Colab usage-policy caveats from the notebook still apply.

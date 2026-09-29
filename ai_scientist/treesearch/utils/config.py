@@ -2,7 +2,7 @@
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Hashable, cast, Literal, Optional
+from typing import Any, Dict, Hashable, cast, Literal, Optional
 
 import coolname
 import rich
@@ -87,6 +87,8 @@ class ExecConfig:
     remote_max_file_mb: float = 100
     remote_wait_minutes: float = 60
     local_postprocessing: bool = False
+    # Colab CLI provisioning for backend colab (autoresearch/colab_runtime.py)
+    colab: Optional[Dict[str, Any]] = None
 
 
 @dataclass

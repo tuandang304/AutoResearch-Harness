@@ -23,10 +23,28 @@ exec:
   # where experiment code runs:
   #   local - on this machine (needs a CUDA GPU for anything non-trivial)
   #   colab - on a Google Colab GPU via notebooks/colab_gpu_executor.ipynb
-  #           (connection details in remote_executor.json)
+  #           (connection details in remote_executor.json), or a runtime the
+  #           Colab CLI provisions per run when colab.auto_provision is true
   backend: local
   remote_max_file_mb: 100    # files larger than this are not synced back from Colab
   remote_wait_minutes: 60    # how long to wait for Colab to come back after a disconnect
+  colab:                     # see docs/remote-execution.md, "Colab CLI provisioning"
+    auto_provision: false    # true: create VMs on demand, stop them after tree search
+    selection: llm           # llm: the code model declares a tier per script; fixed: always `gpu`
+    gpu: T4                  # default tier (fixed: T4 | L4 | G4 | A100 | H100 | cpu, or a fallback list)
+    tiers:                   # tiers the model may choose; rate = compute units/hour (reference values)
+      cpu:  {rate: 0.08, use: "no GPU: numpy/pandas/scikit-learn, tiny PyTorch models, data preparation"}
+      T4:   {rate: 1.19, memory_gb: 15, use: "small CNNs/MLPs/RNNs, transformers up to ~100M parameters, fp16"}
+      L4:   {rate: 1.71, memory_gb: 22, use: "mid-size models or batches that exceed a T4, bf16, roughly 2x T4 speed"}
+      A100: {rate: 5.40, memory_gb: 40, idle_stop_minutes: 10, use: "large models or long training that cannot fit the time limit on L4"}
+    max_sessions: 2          # concurrent VMs across tiers; an idle one is stopped to make room
+    max_upgrade_ratio: 1.5   # an unavailable tier may fall back to one costing <= 1.5x (1 = never)
+    escalate_on_oom: true    # re-run a CUDA out-of-memory failure once on the next larger tier
+    high_mem: false
+    idle_stop_minutes: 30    # stop an idle VM; the next job re-provisions it (null = never)
+    max_compute_units: 30    # stop all VMs and fail the run after this spend (null = no cap)
+    min_balance: 5           # refuse to provision below this account balance
+    max_concurrent: null     # executor job slots per VM; null = agent.num_workers
 
 generate_report: True
 # LLM settings for final report from journal

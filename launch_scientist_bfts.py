@@ -253,6 +253,9 @@ def run_pipeline(args, idea, config):
     os.makedirs(idea_dir, exist_ok=False)
     args.run_dir = Path(idea_dir)
     os.environ["AUTORESEARCH_USAGE_LOG"] = str(Path(idea_dir) / "usage.jsonl")
+    if os.environ.get("AUTORESEARCH_COLAB_STATE"):
+        # One line per remote job: declared tier, allocated GPU, time, estimated units.
+        os.environ["AUTORESEARCH_COMPUTE_LOG"] = str(Path(idea_dir) / "compute.jsonl")
     snapshot_llm_policy(args, config)
 
     # Convert idea json to markdown file
@@ -331,6 +334,7 @@ def run_pipeline(args, idea, config):
         yaml.safe_dump(config, dest)
     update_run_status(args, "running", stage="experiments")
     perform_experiments_bfts(idea_config_path)
+    release_colab_runtime(args, "experiments-complete")  # no GPU needed after tree search
     experiment_results_dir = osp.join(idea_dir, "logs/0-run/experiment_results")
     if not os.path.isdir(experiment_results_dir) or not os.listdir(
         experiment_results_dir
@@ -416,6 +420,26 @@ def run_pipeline(args, idea, config):
     return idea_dir
 
 
+def release_colab_runtime(args, reason):
+    """Stop a CLI-managed Colab VM (idempotent) and record its cost summary."""
+    state_path = os.environ.get("AUTORESEARCH_COLAB_STATE")
+    if not state_path:
+        return
+    from autoresearch.colab_runtime import ColabPool, release_from_env
+    from ai_scientist.treesearch.remote_interpreter import RemoteExecutorUnavailable
+
+    try:
+        release_from_env(reason)
+    except RemoteExecutorUnavailable as exc:
+        # Never mask the run outcome; the watchdog retries when this process exits.
+        print(f"WARNING: could not stop the Colab VM ({exc}); check `colab sessions`",
+              file=sys.stderr)
+    finally:
+        run_dir = getattr(args, "run_dir", None)
+        if run_dir is not None and Path(state_path).is_file():
+            write_json(Path(run_dir) / "colab_runtime.json", ColabPool(state_path).summary())
+
+
 def write_json(path, value):
     """Atomically write metadata, including after interruptions."""
     path = Path(path)
@@ -493,6 +517,7 @@ def main(argv=None):
         "AI_SCIENTIST_ROOT", "AUTORESEARCH_USAGE_LOG",
         "AUTORESEARCH_CODEX_REASONING_EFFORT", "AUTORESEARCH_LLM_CONFIG",
         "AUTORESEARCH_ROUTING_LOG", "AUTORESEARCH_ROUTER_STATE",
+        "AUTORESEARCH_COLAB_STATE", "AUTORESEARCH_COMPUTE_LOG",
     )}
     try:
         args.project = args.project.resolve()
@@ -560,7 +585,18 @@ def main(argv=None):
         os.environ["AI_SCIENTIST_ROOT"] = str(ROOT)
         if config.get("codex_reasoning_effort"):
             os.environ["AUTORESEARCH_CODEX_REASONING_EFFORT"] = config["codex_reasoning_effort"]
-        if config["exec"].get("backend") == "colab":
+        colab = config["exec"].get("colab") or {}
+        if config["exec"].get("backend") == "colab" and colab.get("auto_provision"):
+            if os.environ.get("AI_SCIENTIST_REMOTE_URL") or os.environ.get("AI_SCIENTIST_REMOTE_TOKEN"):
+                raise ValueError(
+                    "Unset AI_SCIENTIST_REMOTE_URL/TOKEN when exec.colab.auto_provision is true"
+                )
+            from autoresearch.colab_runtime import start_managed
+
+            # Checks CLI login and balance now; each tier's VM is created by its first job.
+            pool = start_managed(colab, config["agent"]["num_workers"])
+            os.environ["AUTORESEARCH_COLAB_STATE"] = str(pool.state_path)
+        elif config["exec"].get("backend") == "colab":
             from ai_scientist.treesearch.remote_interpreter import load_remote_config
 
             load_remote_config()
@@ -581,8 +617,11 @@ def main(argv=None):
         return 1
     finally:
         try:
-            if getattr(args, "run_dir", None) is not None:
-                save_token_tracker(args.run_dir)
+            try:
+                release_colab_runtime(args, "run-ended")
+            finally:
+                if getattr(args, "run_dir", None) is not None:
+                    save_token_tracker(args.run_dir)
         finally:
             try:
                 if previous is not None:

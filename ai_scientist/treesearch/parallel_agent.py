@@ -530,6 +530,15 @@ class MinimalAgent:
         return {"Implementation guideline": impl_guideline}
 
     @property
+    def _prompt_compute(self):
+        """Colab tier menu when the code model selects compute (exec.colab.selection=llm)."""
+        if self.cfg.exec.backend != "colab":
+            return {}
+        from autoresearch.colab_runtime import compute_instructions
+
+        return compute_instructions() or {}
+
+    @property
     def _prompt_resp_fmt(self):
         return {
             "Response format": (
@@ -612,6 +621,7 @@ class MinimalAgent:
             "Evaluation Metric(s)": self.evaluation_metrics,
         }
         prompt["Instructions"] |= self._prompt_impl_guideline
+        prompt["Instructions"] |= self._prompt_compute
         prompt["Instructions"] |= self._prompt_environment
 
         if self.cfg.agent.data_preview:
@@ -649,6 +659,7 @@ class MinimalAgent:
             ],
         }
         prompt["Instructions"] |= self._prompt_impl_guideline
+        prompt["Instructions"] |= self._prompt_compute
 
         if self.cfg.agent.data_preview:
             prompt["Data Overview"] = self.data_preview
@@ -674,6 +685,7 @@ class MinimalAgent:
 
         prompt["Instructions"] |= self._prompt_resp_fmt
         prompt["Instructions"] |= self._prompt_impl_guideline
+        prompt["Instructions"] |= self._prompt_compute
 
         plan, code = self.plan_and_code_query(prompt)
         return Node(
@@ -730,6 +742,7 @@ class MinimalAgent:
             ]
         }
         prompt["Instructions"] |= self._prompt_hyperparam_tuning_resp_fmt
+        prompt["Instructions"] |= self._prompt_compute
         plan, code = self.plan_and_code_query(prompt)
         return Node(
             plan="Hyperparam tuning name: " + hyperparam_idea.name + ".\n" + plan,
@@ -783,6 +796,7 @@ class MinimalAgent:
             ]
         }
         prompt["Instructions"] |= self._prompt_ablation_resp_fmt
+        prompt["Instructions"] |= self._prompt_compute
         plan, code = self.plan_and_code_query(prompt)
         return Node(
             plan="Ablation name: " + ablation_idea.name + ".\n" + plan,

@@ -18,6 +18,7 @@ and `ai_scientist` package remain compatible with existing scripts.
 | `ai_scientist/treesearch/backend/` | Tree-search model routing and structured responses |
 | `ai_scientist/treesearch/` | Experiment search, journals, local/remote interpreters |
 | `ai_scientist/remote/` | HTTP executor and bounded workspace-transfer primitives |
+| `autoresearch/colab_runtime.py` | Colab CLI tier pool: model-selected compute, provisioning, watchdog, release |
 | `ai_scientist/utils/token_tracker.py` | SDK usage normalization and worker ledger |
 | `scripts/build_colab_notebook.py` | Deterministic notebook with both executor modules |
 | `tests/` | Offline regressions and localhost integration tests |
@@ -48,6 +49,9 @@ notebook embeddings.
 
 - A live Colab GPU run and a complete paper-generation run are not covered by
   the offline suite. Authenticated CLI availability is account/version dependent.
+  Colab CLI provisioning is tested offline against `tests/fixtures/fake_colab.py`;
+  its bootstrap and tier routing were checked live on CPU and T4 runtimes with
+  CLI 0.7.4. L4/A100 routing and OOM escalation are covered offline only.
 - The execution service and local interpreter run arbitrary generated code with
   user permissions. Workspace validation does not isolate that code.
 - Full pipeline resume after controller shutdown is not implemented. Journals,

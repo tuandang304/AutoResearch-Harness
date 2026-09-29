@@ -11,7 +11,9 @@ Connection settings are read, in order of precedence, from
 ``remote_executor.json`` ({"url": ..., "token": ...}) in the repo root (or the
 path in ``AI_SCIENTIST_REMOTE_CONFIG``). They are re-read on every connection
 attempt, so after restarting Colab you only need to update that file; running
-experiments wait for the executor to come back.
+experiments wait for the executor to come back. When the launcher manages a
+Colab CLI runtime (``exec.colab.auto_provision``), a missing or unreachable
+executor is provisioned or reconnected through autoresearch/colab_runtime.py.
 """
 
 import argparse
@@ -33,6 +35,7 @@ logger = logging.getLogger("ai-scientist")
 
 POLL_SECONDS = 5
 REQUEST_TIMEOUT = 90  # below Cloudflare's ~100s quick-tunnel response limit
+RECOVER_AFTER = 60  # seconds unreachable before asking the Colab manager to reconnect
 
 
 class RemoteExecutorUnavailable(RuntimeError):
@@ -46,11 +49,14 @@ def _config_path() -> Path:
     return Path(root) / "remote_executor.json"
 
 
-def load_remote_config() -> tuple[str, str]:
-    url = os.environ.get("AI_SCIENTIST_REMOTE_URL")
-    token = os.environ.get("AI_SCIENTIST_REMOTE_TOKEN")
+def load_remote_config(path: Path | str | None = None) -> tuple[str, str]:
+    """Connection settings; an explicit path (a managed Colab tier) skips the env."""
+    url = token = None
+    if path is None:
+        url = os.environ.get("AI_SCIENTIST_REMOTE_URL")
+        token = os.environ.get("AI_SCIENTIST_REMOTE_TOKEN")
     if not (url and token):
-        path = _config_path()
+        path = Path(path) if path is not None else _config_path()
         if path.exists():
             try:
                 cfg = json.loads(path.read_text())
@@ -125,6 +131,13 @@ class RemoteInterpreter:
         self.wait_minutes = wait_minutes
         self.process = None  # interface compatibility with Interpreter
         self._job_id = None
+        # Managed Colab pool: executor file and tier of the current job. The tier
+        # stays for undeclared follow-up code (metric parsing, plotting).
+        self._executor = None
+        self._tier = None
+
+    def _config(self) -> tuple[str, str]:
+        return load_remote_config(self._executor)
 
     # ------------------------------------------------------------------ http
 
@@ -136,9 +149,23 @@ class RemoteInterpreter:
         if _deadline is not None:
             deadline = min(deadline, _deadline)
         warned = False
+        managed = bool(os.environ.get("AUTORESEARCH_COLAB_STATE"))
+        failing_since = recovered_at = None
         while True:
+            if managed and failing_since is not None and time.monotonic() - max(
+                failing_since, recovered_at or failing_since
+            ) >= RECOVER_AFTER:
+                recovered_at = time.monotonic()
+                self._recover()
+                continue
             try:
-                url, token = load_remote_config()
+                try:
+                    url, token = self._config()
+                except RemoteExecutorUnavailable:
+                    if not managed:
+                        raise
+                    self._recover()  # the tier's VM was stopped (idle) or lost
+                    url, token = self._config()
                 resp = requests.request(
                     method,
                     url + path,
@@ -163,6 +190,7 @@ class RemoteInterpreter:
                 err = f"HTTP {resp.status_code}"
             except requests.RequestException as e:
                 err = str(e)
+            failing_since = failing_since or time.monotonic()
             if time.monotonic() >= deadline:
                 raise RemoteExecutorUnavailable(
                     f"Remote executor unreachable for {self.wait_minutes} min ({err}). "
@@ -176,6 +204,12 @@ class RemoteInterpreter:
                 warned = True
             time.sleep(min(15, max(0, deadline - time.monotonic())))
 
+    def _recover(self) -> None:
+        """Provision or reconnect this job's tier; budget/release errors propagate."""
+        from autoresearch.colab_runtime import managed_pool
+
+        self._executor = managed_pool().ensure(self._tier)
+
     # ------------------------------------------------------------- workspace
 
     def _pack_workspace(self) -> tuple[str, set[str]]:
@@ -184,7 +218,7 @@ class RemoteInterpreter:
             logger.warning("Not uploading %s: larger than %s MB", rel, self.max_file_mb)
         return base64.b64encode(data).decode(), sent
 
-    def _apply_workspace(self, data: bytes, sent: set[str], skipped: list[str]) -> None:
+    def _apply_workspace(self, data: bytes, sent: set[str], skipped: list[str]) -> set[str]:
         received = extract_workspace(data, self.working_dir)
         # files the remote code deleted (e.g. os.remove) disappear locally too
         for rel in sent - received - set(skipped):
@@ -193,6 +227,7 @@ class RemoteInterpreter:
             logger.warning(
                 f"Remote file {rel} is larger than {self.max_file_mb} MB; left on Colab"
             )
+        return received
 
     # ------------------------------------------------------------ interface
 
@@ -207,6 +242,61 @@ class RemoteInterpreter:
         # Keep a local copy of the executed file, like Interpreter does.
         safe_path(self.working_dir, self.agent_file_name).write_text(code)
         tgz_b64, sent = self._pack_workspace()
+        if not os.environ.get("AUTORESEARCH_COLAB_STATE"):
+            return self._execute(code, tgz_b64, sent)[0]
+        return self._run_managed(code, tgz_b64, sent)
+
+    def _run_managed(self, code: str, tgz_b64: str, sent: set[str]) -> ExecutionResult:
+        """Run on the tier the code declares; re-run once a tier larger on CUDA OOM."""
+        from autoresearch import colab_runtime as colab
+
+        pool = colab.managed_pool()
+        settings = pool.load()["settings"]
+        declared, reason = colab.parse_compute(code)
+        requested = declared or self._tier
+        notes, escalated_from = [], None
+        wait_until = time.monotonic() + self.wait_minutes * 60
+        while True:
+            try:
+                self._tier, self._executor, skipped = pool.acquire(requested)
+            except colab.NoTierAvailable as exc:
+                # Colab capacity; budget/release errors are not retried.
+                if time.monotonic() >= wait_until:
+                    raise
+                logger.warning("%s; retrying in 60s", exc)
+                time.sleep(min(60, max(0, wait_until - time.monotonic())))
+                continue
+            notes += skipped
+            result, received = self._execute(code, tgz_b64, sent)
+            larger = colab.next_tier(settings, self._tier) if colab.is_oom(result) else None
+            if larger is None or escalated_from is not None:
+                break
+            # Same code and uploaded snapshot; drop files the failed attempt created.
+            for rel in received - sent:
+                safe_path(self.working_dir, rel).unlink(missing_ok=True)
+            notes.append(f"{self._tier} ran out of GPU memory; re-ran on {larger}")
+            escalated_from, requested = self._tier, larger
+        entry = pool.load()["sessions"].get(self._tier, {})
+        rate = colab.tier_rate(pool, self._tier)
+        summary = (
+            f"[compute] Requested {declared or 'no tier'}"
+            + (f" ({reason})" if reason else "")
+            + f"; ran on {self._tier} ({entry.get('gpu')}) in {result.exec_time:.0f}s"
+            + (f", ~{rate * result.exec_time / 3600:.3f} compute units" if rate else "")
+            + "".join(f". {note}" for note in notes)
+            + ".\n"
+        )
+        result.term_out = [summary] + list(result.term_out)
+        colab.log_compute({
+            "time": time.time(), "workspace": str(self.working_dir),
+            "declared": declared, "reason": reason, "tier": self._tier,
+            "gpu": entry.get("gpu"), "exec_time": result.exec_time,
+            "estimated_units": rate * result.exec_time / 3600 if rate else None,
+            "escalated_from": escalated_from, "notes": notes, "exc_type": result.exc_type,
+        })
+        return result
+
+    def _execute(self, code: str, tgz_b64: str, sent: set[str]) -> tuple[ExecutionResult, set[str]]:
         spec = {
             "job_id": uuid.uuid4().hex,
             "code": code,
@@ -249,7 +339,7 @@ class RemoteInterpreter:
             resp = self._request("GET", f"/jobs/{self._job_id}/workspace")
             resp.raise_for_status()
             skipped = json.loads(resp.headers.get("X-Skipped-Files", "[]"))
-            self._apply_workspace(resp.content, sent, skipped)
+            received = self._apply_workspace(resp.content, sent, skipped)
             if skipped:
                 logger.warning(
                     "Remote job %s retained for manual retrieval of skipped files (server TTL applies)",
@@ -270,7 +360,7 @@ class RemoteInterpreter:
                     if r["exc_stack"]
                     else r["exc_stack"]
                 ),
-            )
+            ), received
         raise RemoteExecutorUnavailable(
             "Remote job was lost 3 times in a row; giving up"
         )
@@ -278,7 +368,7 @@ class RemoteInterpreter:
     def cleanup_session(self):
         if self._job_id is not None:
             try:
-                url, token = load_remote_config()
+                url, token = self._config()
                 requests.delete(
                     f"{url}/jobs/{self._job_id}",
                     headers={"Authorization": f"Bearer {token}"},

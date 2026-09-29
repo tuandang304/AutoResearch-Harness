@@ -70,6 +70,9 @@ def validate_config(config):
             )
     if execution.get("backend", "local") not in ("local", "colab"):
         raise ValueError("exec.backend must be local or colab")
+    from autoresearch.colab_runtime import validate_colab_settings
+
+    validate_colab_settings(execution.get("colab"))
     if execution.get("backend") == "colab" and (
         execution.get("timeout", 3600) > 86400
         or execution.get("remote_max_file_mb", 100) > 512

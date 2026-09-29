@@ -99,6 +99,20 @@ coverage differs between stages.
 
 ## Colab
 
+**Automatic (Colab CLI).** Install and log in to the
+[Colab CLI](https://pypi.org/project/google-colab-cli/) (`colab usage` should show
+your balance), then set `exec.colab.auto_provision: true` in the project config
+and launch with `--exec_backend colab`. The code model declares a tier for each
+script (`# COMPUTE: T4`) from the configured menu (cpu, T4, L4, A100 by
+default). Each tier's VM starts on its first job. VMs stop when the tree search
+ends, after their idle limit, at `max_compute_units`, or if the controller
+dies. Out-of-memory failures are re-run once on the next tier. Choices and
+estimated units are logged in the run's `compute.jsonl`. For a standalone
+executor: `python -m autoresearch.colab_runtime up --gpu T4` (then `status` /
+`down`).
+
+**Manual (notebook).**
+
 1. Open [the executor notebook](notebooks/colab_gpu_executor.ipynb) in a GPU runtime.
 2. Run setup/start cells. Save the printed URL/token JSON in root-level
    `remote_executor.json` (gitignored).
