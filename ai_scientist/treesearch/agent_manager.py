@@ -523,13 +523,14 @@ Your research idea:\n\n
                 self.cfg.agent.stages.stage3_max_iters / 2
             ):
                 if exec_time_minutes < self.cfg.exec.timeout / 60 / 2:
+                    limit_minutes = self.cfg.exec.timeout / 60
                     exec_time_feedback = (
-                        f"Implementation works but runs too quickly ({exec_time_minutes:.2f} minutes)."
-                        "We have up to 60 minutes available for each experiment."
-                        "Make sure to scale up the experiment "
-                        "by increasing the number of epochs, using a larger model, or working with bigger datasets."
-                        "Given that the current execution time is {exec_time_minutes:.2f} minutes, think about how changing the number of epochs to run, or using a larger model, or working with bigger datasets to run"
-                        "will affect the execution time, and make sure to scale up the experiment accordingly."
+                        f"Implementation works but runs quickly ({exec_time_minutes:.2f} minutes). "
+                        f"Each experiment may take up to {limit_minutes:.0f} minutes. "
+                        "If the research idea's budget allows, consider scaling up the experiment "
+                        "(more epochs, a larger model or more data), estimating how each change "
+                        f"affects the current {exec_time_minutes:.2f}-minute run time so it stays "
+                        "well within the limit. Follow the research idea's time targets when it gives them."
                     )
                     print(f"[cyan]exec_time_feedback: {exec_time_feedback}[/cyan]")
                     self.journals[stage.name].nodes[
@@ -654,6 +655,18 @@ Your research idea:\n\n
         main_stage_num, main_stage_name, sub_stage_num, _ = self.parse_stage_names(
             current_substage.name
         )
+        # Sub-stages share their main stage's node budget; each journal also
+        # holds one node carried over from the previous sub-stage.
+        used = sum(
+            len(self.journals[s.name].nodes) - (i > 0)
+            for i, s in enumerate(
+                s for s in self.stages if self.parse_stage_names(s.name)[0] == main_stage_num
+            )
+        )
+        remaining = self._get_max_iterations(main_stage_num) - used
+        if remaining < 1:
+            logger.info(f"Main stage {main_stage_num} node budget spent; no new sub-stage")
+            return None
         main_stage_goal = self.main_stage_goals[main_stage_num]
         sub_stage_goal, sub_stage_name = self._generate_substage_goal(
             main_stage_goal, journal
@@ -666,9 +679,10 @@ Your research idea:\n\n
             + main_stage_goal
             + "\n\nSub-stage goals:\n"
             + sub_stage_goal,
-            max_iterations=self._get_max_iterations(main_stage_num),
+            max_iterations=remaining + 1,
             num_drafts=0,
-            stage_number=current_substage.stage_number + 1,
+            # the main stage number drives stage-specific completion checks
+            stage_number=current_substage.stage_number,
         )
 
     def _create_next_main_stage(
@@ -686,7 +700,7 @@ Your research idea:\n\n
         sub_stage_num = 1
         sub_stage_name = "first_attempt"
         num_drafts = 0
-        stage_number = current_substage.stage_number + 1
+        stage_number = main_stage_num + 1
         description = f"first_attempt"
         main_stage_goal = self.main_stage_goals[main_stage_num + 1]
 
@@ -718,7 +732,7 @@ Your research idea:\n\n
                         print(f"[cyan]self.stage_history: {self.stage_history}[/cyan]")
                         prev_best = self._get_best_implementation(prev_stage)
                         if prev_best:
-                            self.journals[self.current_stage.name].append(prev_best)
+                            self.journals[current_substage.name].append(prev_best)
                         else:
                             print(
                                 f"[red]No previous best implementation found for {self.current_stage.name}. Something went wrong so finishing the experiment...[/red]"

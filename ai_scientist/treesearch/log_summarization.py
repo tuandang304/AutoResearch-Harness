@@ -296,14 +296,42 @@ def annotate_history(journal, cfg=None):
             node.overall_plan = node.plan
 
 
+def journals_by_main_stage(journals):
+    """One (name, journal) per main stage 1-4, or None for a stage that never ran.
+
+    Stages 1-3 use their last sub-stage, which holds the carried-over best node;
+    stage 4 merges its sub-stages so every ablation is summarized.
+    """
+    grouped = {}
+    for stage_name, journal in journals:
+        grouped.setdefault(int(stage_name.split("_", 1)[0]), []).append((stage_name, journal))
+    selected = []
+    for number in (1, 2, 3, 4):
+        entries = grouped.get(number)
+        if not entries:
+            selected.append(None)
+        elif number == 4 and len(entries) > 1:
+            merged = Journal(nodes=[n for _, j in entries for n in j.nodes])
+            selected.append((entries[-1][0], merged))
+        else:
+            selected.append(entries[-1])
+    return selected
+
+
 def overall_summarize(journals, cfg=None):
     from concurrent.futures import ThreadPoolExecutor
 
+    journals = journals_by_main_stage(journals)
+
     def process_stage(idx, stage_tuple):
+        if stage_tuple is None:
+            return None
         stage_name, journal = stage_tuple
         annotate_history(journal, cfg=cfg)
         if idx in [1, 2]:
             best_node = journal.get_best_node(cfg=cfg)
+            if best_node is None:
+                return {"best node": None, "best node with different seeds": []}
             # get multi-seed results and aggregater node
             child_nodes = best_node.children
             multi_seed_nodes = [

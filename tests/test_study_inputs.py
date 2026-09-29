@@ -11,7 +11,9 @@ from omegaconf import OmegaConf
 import yaml
 
 from autoresearch.config import ROOT, load_run_config, validate_config
-from ai_scientist.treesearch.agent_manager import AgentManager
+from ai_scientist.treesearch.agent_manager import AgentManager, Stage
+from ai_scientist.treesearch.journal import Journal, Node
+from ai_scientist.treesearch.log_summarization import journals_by_main_stage
 from ai_scientist.treesearch.parallel_agent import MinimalAgent
 
 FIXTURE = ROOT / "tests" / "fixtures" / "pipeline.yaml"
@@ -23,7 +25,8 @@ IDEA = {
 
 
 def manager(idea):
-    cfg = OmegaConf.create({"agent": {"search": {"num_drafts": 1}, "stages": {}, "steps": 2}})
+    cfg = OmegaConf.create({"agent": {"search": {"num_drafts": 1}, "stages": {}, "steps": 2,
+                                      "max_stages": 4}})
     with tempfile.TemporaryDirectory() as root:
         return AgentManager(json.dumps(idea), cfg, Path(root))
 
@@ -44,6 +47,33 @@ class StageInputTests(unittest.TestCase):
             desc = m._curate_task_desc(SimpleNamespace(name=name))
             self.assertIn("Stage 4 ablations: no noise.", desc)
             self.assertEqual("Risk Factors" in desc, name.startswith("4_"))
+
+
+class SubStageTests(unittest.TestCase):
+    def test_sub_stages_keep_their_stage_number_and_share_the_budget(self):
+        m = manager(IDEA)
+        m.cfg.agent.stages = {"stage3_max_iters": 4}
+        first = Stage(name="3_creative_research_1_first_attempt", description="",
+                      goals="g", max_iterations=4, num_drafts=0, stage_number=3)
+        m.stages = [first]
+        m.journals = {first.name: Journal(nodes=[Node(code="", plan=""), Node(code="", plan="")])}
+        m._generate_substage_goal = lambda goal, journal: ("more", "second")
+        second = m._create_next_substage(first, m.journals[first.name], "")
+        self.assertEqual((second.stage_number, second.max_iterations), (3, 3))
+        m.stages.append(second)
+        m.journals[second.name] = Journal(nodes=[Node(code="", plan="") for _ in range(3)])
+        self.assertIsNone(m._create_next_substage(second, m.journals[second.name], ""))
+        after = m._create_next_main_stage(second, m.journals[second.name])
+        self.assertEqual((after.name.split("_")[0], after.stage_number), ("4", 4))
+
+    def test_summaries_take_one_journal_per_main_stage(self):
+        a, b, c, d = (Journal(nodes=[Node(code="", plan=str(i))]) for i in range(4))
+        chosen = journals_by_main_stage([("1_x_1_a", a), ("3_y_1_a", b), ("3_y_2_b", c),
+                                         ("4_z_1_a", d), ("4_z_2_b", a)])
+        self.assertEqual(chosen[0], ("1_x_1_a", a))
+        self.assertIsNone(chosen[1])
+        self.assertEqual(chosen[2], ("3_y_2_b", c))
+        self.assertEqual(len(chosen[3][1].nodes), 2)
 
 
 class ConfigTests(unittest.TestCase):
