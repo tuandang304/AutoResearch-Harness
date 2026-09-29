@@ -53,6 +53,7 @@ import uuid
 import requests
 
 from ai_scientist.treesearch.remote_interpreter import (
+    PoolClosed,
     RemoteExecutorUnavailable,
     SessionStatusUnknown,
     _config_path,
@@ -113,7 +114,8 @@ SCALE_OUT_RESERVE_HOURS = 0.5  # a new replica needs this much budget at its tie
 _SECRET = re.compile(r"(token=)[^\s&'\"]+", re.I)
 _ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
 _BOX = re.compile(r"[\u2500-\u257f]+")
-_TRANSIENT = re.compile(r"Service Unavailable|\b50[234]\b|capacity|try again|Unavailable", re.I)
+_TRANSIENT = re.compile(r"Service Unavailable|\b50[234]\b|capacity|try again|Unavailable|"
+                        r"Timeout|timed out|Connection(Reset)?Error|Temporary failure", re.I)
 _COMPUTE = re.compile(r"^[ \t]*#[ \t]*COMPUTE:[ \t]*([A-Za-z0-9]+)[ \t]*(?:[#:-][ \t]*(.*))?$",
                       re.M | re.I)
 _OOM = re.compile(r"CUDA out of memory|OutOfMemoryError|CUBLAS_STATUS_ALLOC_FAILED")
@@ -378,7 +380,7 @@ class ColabCLI:
 
     def run(self, *args, timeout=CLI_TIMEOUT, check=True, stdin_text=None):
         if shutil.which(self.binary) is None:
-            raise RemoteExecutorUnavailable(
+            raise PoolClosed(
                 f"Colab CLI {self.binary!r} not found; install it with "
                 "`uv tool install google-colab-cli`"
             )
@@ -422,9 +424,10 @@ class ColabCLI:
                 raise
             raise SessionStatusUnknown(f"colab status -s {name}: {exc}") from exc
         text = out + err
-        if "not found" in text.lower():
+        # the CLI's own wording; a traceback may contain "not found" elsewhere
+        if code == 0 and f"Session '{name}' not found" in text:
             return False
-        if f"[{name}]" in text:
+        if code == 0 and f"[{name}]" in text:
             return True
         raise SessionStatusUnknown(
             f"colab status -s {name} gave no verdict (exit {code}): {redact(text).strip()[-300:]}")
@@ -639,7 +642,7 @@ class ColabPool:
     def _check_balance(self, settings):
         balance, rate = self.cli.usage()
         if balance < settings["min_balance"]:
-            raise RemoteExecutorUnavailable(
+            raise PoolClosed(
                 f"Colab balance {balance:.2f} is below exec.colab.min_balance "
                 f"{settings['min_balance']}; not provisioning"
             )
@@ -648,11 +651,11 @@ class ColabPool:
     @staticmethod
     def _check_pool(state):
         if state["released"]:
-            raise RemoteExecutorUnavailable(
+            raise PoolClosed(
                 f"Colab pool {state['pool']} was released ({state['stop_reason']})"
             )
         if state["stop_reason"] == "budget":
-            raise RemoteExecutorUnavailable(
+            raise PoolClosed(
                 f"Colab budget of {state['settings']['max_compute_units']} compute units "
                 f"is spent (pool {state['pool']})"
             )
@@ -735,7 +738,8 @@ class ColabPool:
             if entry.get("unavailable_until", 0) > time.time():
                 raise TierUnavailable(f"{tier} was unavailable recently ({entry['stop_reason']})")
             if self.cli.session_exists(entry["session"]):
-                self._bootstrap(tier, reuse_token=True)
+                # the VM may still run jobs: never stop it for a failed reconnect
+                self._bootstrap(tier, reuse_token=True, keep_vm=True)
             else:
                 self._make_room(tier, wait=wait_for_room)
                 self._provision(tier)
@@ -805,10 +809,14 @@ class ColabPool:
             if after is not None and after > before:
                 current["measured_rate"] = round(after - before, 3)
 
-    def _bootstrap(self, tier, reuse_token):
-        """Start (or reuse) the server and a tunnel; one tunnel restart if unreachable."""
+    def _bootstrap(self, tier, reuse_token, keep_vm=False):
+        """Start (or reuse) the server and a tunnel; one tunnel restart if unreachable.
+
+        keep_vm: an existing VM is left running when its tunnel stays unreachable
+        (a transient error the caller retries); a new VM is stopped instead.
+        """
         for attempt in range(2):
-            url = self._bootstrap_once(tier, reuse_token or attempt > 0)
+            url = self._bootstrap_once(tier, reuse_token or attempt > 0, keep_vm)
             entry = self._entry(self.load(), tier)
             deadline = time.time() + HEALTH_SECONDS
             while time.time() < deadline:
@@ -819,12 +827,16 @@ class ColabPool:
         _, out, _ = self.cli.run(
             "exec", "-s", entry["session"], "--timeout", "30", timeout=90, check=False,
             stdin_text="print(open('/content/aisci/tunnel.log').read()[-1500:])")
+        if keep_vm:
+            raise RemoteExecutorUnavailable(
+                f"Executor on {entry['session']} restarted but {note}; VM kept for a retry. "
+                f"Tunnel log: {redact(out)[-800:]}")
         self._halt(tier, "tunnel-unreachable")
         raise RemoteExecutorUnavailable(
             f"Executor on {entry['session']} started but {note}; VM stopped. "
             f"Tunnel log: {redact(out)[-800:]}")
 
-    def _bootstrap_once(self, key, reuse_token):
+    def _bootstrap_once(self, key, reuse_token, keep_vm=False):
         tier = _tier_of(key)
         state = self.load()
         entry = self._entry(state, key)
@@ -852,6 +864,10 @@ class ColabPool:
         fields = dict(re.findall(r"^AISCI_(\w+)=(.*)$", out, re.M))
         if "URL" not in fields:
             # `colab exec` exits 0 on remote exceptions; the marker is authoritative.
+            if keep_vm:
+                raise RemoteExecutorUnavailable(
+                    f"Executor restart on {name} printed no URL; VM kept for a retry: "
+                    f"{redact(err or out).strip()[-600:]}")
             self._halt(key, "bootstrap-failed")
             raise RemoteExecutorUnavailable(
                 f"Executor bootstrap failed on {name}: {redact(err or out).strip()[-1200:]}"

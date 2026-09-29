@@ -18,6 +18,7 @@ from autoresearch.colab_runtime import (
 from autoresearch.config import validate_config
 from ai_scientist.treesearch.interpreter import ExecutionResult
 from ai_scientist.treesearch.remote_interpreter import (
+    PoolClosed,
     RemoteExecutorUnavailable,
     RemoteInterpreter,
     SessionStatusUnknown,
@@ -355,6 +356,31 @@ class PoolTests(unittest.TestCase):
         pool.ensure("T4")  # the VM still exists: only the server/tunnel restarts
         self.assertEqual(sum(c.startswith("new") for c in self.calls()), 1)
         self.assertIsNone(self.run_job("print('again')").exc_type)
+
+    def test_failed_reconnect_keeps_an_existing_vm(self):
+        pool = self.managed()
+        self.assertIsNone(self.run_job("print('first')").exc_type)
+        server = json.loads((self.dir / "state.json").read_text())["sessions"]
+        os.killpg(next(iter(server.values()))["server_pid"], signal.SIGTERM)
+        os.environ["FAKE_COLAB_BAD_URL"] = "1"  # the restarted tunnel stays unreachable
+        with patch.object(colab_runtime, "HEALTH_SECONDS", 0.2), \
+                patch.object(colab_runtime.time, "sleep"), \
+                self.assertRaisesRegex(RemoteExecutorUnavailable, "VM kept"):
+            pool.ensure("T4")
+        self.assertEqual(len(self.vm_sessions()), 1)  # not stopped
+        self.assertFalse(any(c.startswith("stop") for c in self.calls()))
+        del os.environ["FAKE_COLAB_BAD_URL"]
+        pool.ensure("T4")
+        self.assertEqual(sum(c.startswith("new") for c in self.calls()), 1)
+
+    def test_reconnect_retries_transient_errors_but_not_a_closed_pool(self):
+        interpreter = self.interpreter()
+        with patch.object(RemoteInterpreter, "_recover",
+                          side_effect=colab_runtime.TierUnavailable("L4: ReadTimeoutError")):
+            self.assertFalse(interpreter._try_recover())
+        with patch.object(RemoteInterpreter, "_recover", side_effect=PoolClosed("budget spent")), \
+                self.assertRaises(PoolClosed):
+            interpreter._try_recover()
 
     def background_job(self, code, results, name):
         thread = threading.Thread(target=lambda: results.__setitem__(name, self.run_job(code)))

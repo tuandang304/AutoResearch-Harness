@@ -71,7 +71,9 @@ def main(args):
         return 0
     if command == "status":
         if (HOME / "status_fails").exists():  # e.g. DNS failure on the controller
-            print("ConnectionError: Temporary failure in name resolution", file=sys.stderr)
+            print("Traceback (most recent call last):\n  741 elif isinstance(e, ReadTimeoutError):\n"
+                  "FileNotFoundError: token not found\n"
+                  "ConnectionError: Temporary failure in name resolution", file=sys.stderr)
             return 1
         if session in sessions:
             print(f"[{session}] m-s-fake | Hardware: {sessions[session]['gpu']} | Status: IDLE")

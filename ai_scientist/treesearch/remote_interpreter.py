@@ -42,6 +42,11 @@ class RemoteExecutorUnavailable(RuntimeError):
     pass
 
 
+class PoolClosed(RemoteExecutorUnavailable):
+    """The managed Colab pool can run no more jobs (released, budget spent, low
+    balance or no CLI). Unlike other unavailability, waiting does not help."""
+
+
 class SessionStatusUnknown(RemoteExecutorUnavailable):
     """The Colab CLI could not say whether a VM exists (network or CLI error).
 
@@ -222,12 +227,15 @@ class RemoteInterpreter:
         self._executor = managed_pool().ensure(self._replica)
 
     def _try_recover(self) -> bool:
-        """_recover, but False (retry later) when the VM's status is unknown."""
+        """_recover, but False (retry later) on a transient failure: unknown VM
+        status, a CLI/network error or a refused allocation. PoolClosed propagates."""
         try:
             self._recover()
             return True
-        except SessionStatusUnknown as exc:
-            logger.warning("%s; not replacing the VM, retrying later", exc)
+        except PoolClosed:
+            raise
+        except RemoteExecutorUnavailable as exc:
+            logger.warning("Reconnect failed (%s); retrying later", exc)
             return False
 
     # ------------------------------------------------------------- workspace
@@ -283,7 +291,9 @@ class RemoteInterpreter:
         while True:
             try:
                 placed = pool.acquire(requested, exclusive=exclusive)
-            except (colab.NoTierAvailable, SessionStatusUnknown) as exc:
+            except PoolClosed:
+                raise
+            except RemoteExecutorUnavailable as exc:
                 # Colab capacity or a CLI/network blip; budget/release errors are not retried.
                 if time.monotonic() >= wait_until:
                     raise
