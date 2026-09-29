@@ -43,6 +43,11 @@ CLI_PROVIDERS = ("claude-code", "codex", "antigravity")
 
 # Suggested model names per provider; any "<provider>/<name>" string is accepted.
 CLI_MODELS = [
+    "claude-code/claude-opus-5-5",
+    "codex/gpt-6-astra",
+    "codex/gpt-6-sol",
+    "codex/gpt-6-luna",
+    "antigravity/gemini-3.8-flash",
     "claude-code/default",
     "claude-code/fable",
     "claude-code/opus",
@@ -83,15 +88,27 @@ _NO_TOOLS_NOTE = (
 
 
 class CLIError(RuntimeError):
-    pass
+    def __init__(self, message, *, metadata=None):
+        super().__init__(message)
+        self.metadata = metadata or {}
+
+
+def sanitized_error_text(value):
+    """Scrub diagnostic strings before exporting protocol errors."""
+    text = str(value)
+    text = re.sub(r"https?://\S+", "[URL]", text)
+    text = re.sub(r"(?i)(bearer\s+|(?:token|api[_-]?key|authorization|password|secret)[\s\"']*[:=][\s\"']*)[^\s,}\"']+", r"\1[REDACTED]", text)
+    text = re.sub(r"\b(?:sk-|sk_)[A-Za-z0-9_-]+", "[REDACTED]", text)
+    text = re.sub(r"[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}", "[EMAIL]", text)
+    return text[:2000]
 
 
 def is_cli_model(model: str | None) -> bool:
-    return bool(model) and model.split("/", 1)[0] in CLI_PROVIDERS and "/" in model
+    return bool(model) and model.split("/", 1)[0] in (*CLI_PROVIDERS, "router") and "/" in model
 
 
 def split_cli_model(model: str) -> tuple[str, str | None]:
-    if not is_cli_model(model):
+    if not is_cli_model(model) or model.split("/", 1)[0] == "router":
         raise ValueError(f"Unsupported CLI model: {model!r}")
     provider, name = model.split("/", 1)
     return provider, (None if name in ("", "default") else name)
@@ -354,7 +371,32 @@ def _run_streaming(cmd: list[str], cwd: str, stdin: str, is_final) -> list[str]:
     return out
 
 
-def _run_claude_code(model, system, prompt, images, workdir):
+def _validate_effort(provider, effort):
+    allowed = {
+        "codex": ("none", "minimal", "low", "medium", "high", "xhigh", "max"),
+        "claude-code": ("low", "medium", "high", "xhigh", "max"),
+        "antigravity": ("low", "medium", "high", "max"),
+    }
+    if effort is not None and effort not in allowed[provider]:
+        raise ValueError(f"Invalid {provider} effort: {effort!r}")
+
+
+def _reported_model(event):
+    """Read protocol metadata only, never generated response text."""
+    for value in (event, event.get("message"), event.get("result"),
+                  event.get("metadata"), event.get("session")):
+        if isinstance(value, dict):
+            model = value.get("model")
+            if isinstance(model, str) and model:
+                return model
+    models = event.get("modelUsage")
+    if isinstance(models, dict) and len(models) == 1:
+        return next(iter(models))
+    return None
+
+
+def _run_claude_code(model, system, prompt, images, workdir, *, effort=None):
+    _validate_effort("claude-code", effort)
     content = [{"type": "text", "text": prompt}]
     for url in images:
         data, media_type = _image_bytes(url)
@@ -388,21 +430,49 @@ def _run_claude_code(model, system, prompt, images, workdir):
     ]
     if model:
         cmd += ["--model", model]
+    if effort is not None:
+        cmd += ["--effort", effort]
     lines = _run_streaming(
         cmd, workdir, stdin + "\n", lambda e: e.get("type") == "result"
     )
 
     result = None
+    reported = None
+    diagnostics = {}
     for line in lines:
         try:
             event = json.loads(line)
         except json.JSONDecodeError:
             continue
+        if not isinstance(event, dict):
+            continue
+        reported = _reported_model(event) or reported
+        if event.get("type") == "system" and event.get("subtype") == "init":
+            diagnostics["initialized_model"] = sanitized_error_text(event.get("model", ""))
+        if event.get("error"):
+            diagnostics["error_code"] = sanitized_error_text(event["error"])
+        if event.get("errors"):
+            diagnostics["errors"] = sanitized_error_text(event["errors"])
+        if event.get("stderr"):
+            diagnostics["stderr"] = sanitized_error_text(event["stderr"])
+        if event.get("type") == "rate_limit_event":
+            info = event.get("rate_limit_info", {})
+            diagnostics["rate_limit"] = {
+                key: sanitized_error_text(info[key])
+                for key in ("status", "rateLimitType", "resetsAt", "overageStatus", "overageDisabledReason")
+                if key in info
+            }
         if event.get("type") == "result":
             result = event
     if result is None or result.get("is_error") or result.get("subtype") != "success":
-        detail = (result or {}).get("result") or "".join(lines)[-2000:]
-        raise CLIError(f"claude failed: {detail}")
+        detail = (result or {}).get("errors") or (result or {}).get("result") or diagnostics.get("errors") or diagnostics.get("stderr") or "No successful result event"
+        diagnostics.update({
+            "subtype": (result or {}).get("subtype"),
+            "is_error": (result or {}).get("is_error"),
+            "reported_model": reported,
+            "error_text": sanitized_error_text((result or {}).get("errors") or detail),
+        })
+        raise CLIError(f"claude failed: {sanitized_error_text(detail)}", metadata=diagnostics)
     u = result.get("usage", {})
     usage = {
         "prompt": u.get("input_tokens", 0)
@@ -412,10 +482,15 @@ def _run_claude_code(model, system, prompt, images, workdir):
         "cached": u.get("cache_read_input_tokens", 0),
         "reasoning": u.get("output_tokens_details", {}).get("thinking_tokens", 0),
     }
+    if reported:
+        usage["reported_model"] = reported
     return result.get("result", ""), usage
 
 
-def _run_codex(model, system, prompt, images, workdir):
+def _run_codex(model, system, prompt, images, workdir, *, effort=None):
+    if effort is None:
+        effort = os.environ.get("AUTORESEARCH_CODEX_REASONING_EFFORT") or None
+    _validate_effort("codex", effort)
     image_args = []
     for i, url in enumerate(images):
         data, media_type = _image_bytes(url)
@@ -449,10 +524,7 @@ def _run_codex(model, system, prompt, images, workdir):
     ]
     if model:
         cmd += ["-m", model]
-    effort = os.environ.get("AUTORESEARCH_CODEX_REASONING_EFFORT")
     if effort:
-        if effort not in ("none", "minimal", "low", "medium", "high", "xhigh", "max"):
-            raise ValueError("Invalid AUTORESEARCH_CODEX_REASONING_EFFORT")
         cmd += ["-c", f'model_reasoning_effort="{effort}"']
     cmd.append("-")  # read the prompt from stdin
     lines = _run_streaming(
@@ -464,6 +536,7 @@ def _run_codex(model, system, prompt, images, workdir):
 
     usage = {"prompt": 0, "completion": 0, "cached": 0, "reasoning": 0}
     error = None
+    reported = None
     text = ""
     for line in lines:
         try:
@@ -472,6 +545,7 @@ def _run_codex(model, system, prompt, images, workdir):
             continue
         if not isinstance(event, dict):
             continue
+        reported = _reported_model(event) or reported
         if (
             event.get("type") == "item.completed"
             and event.get("item", {}).get("type") == "agent_message"
@@ -494,10 +568,13 @@ def _run_codex(model, system, prompt, images, workdir):
         raise CLIError(
             f"codex failed: {json.dumps(error) if error else ''.join(lines)[-2000:]}"
         )
+    if reported:
+        usage["reported_model"] = reported
     return text, usage
 
 
-def _run_antigravity(model, system, prompt, images, workdir):
+def _run_antigravity(model, system, prompt, images, workdir, *, effort=None):
+    _validate_effort("antigravity", effort)
     full_prompt = f"{_NO_TOOLS_NOTE}\n\n"
     if system:
         full_prompt += f"<system_instructions>\n{system}\n</system_instructions>\n\n"
@@ -534,16 +611,22 @@ def _run_antigravity(model, system, prompt, images, workdir):
     ]
     if model:
         cmd += ["--model", model]
+    if effort is not None:
+        cmd += ["--effort", effort]
     lines = _run_streaming(
         cmd, workdir, stdin + "\n", lambda e: e.get("event") == "result"
     )
 
     result = None
+    reported = None
     for line in lines:
         try:
             event = json.loads(line)
         except json.JSONDecodeError:
             continue
+        if not isinstance(event, dict):
+            continue
+        reported = _reported_model(event) or reported
         if event.get("event") == "result":
             result = event.get("result", {})
     if (
@@ -568,6 +651,8 @@ def _run_antigravity(model, system, prompt, images, workdir):
         "cached": u.get("cache_read_tokens", 0),
         "reasoning": u.get("thinking_tokens", 0),
     }
+    if reported:
+        usage["reported_model"] = reported
     return result["response"], usage
 
 
@@ -578,23 +663,36 @@ _RUNNERS = {
 }
 
 
-def complete(model: str, messages: list[dict]) -> tuple[str, dict]:
-    """Run one completion through the CLI named by ``model``."""
+def complete(model: str, messages: list[dict], *, effort=None, max_attempts=None) -> tuple[str, dict]:
+    """Complete with call-local effort and total attempt limit (including first).
+
+    ``usage['model']`` is the exact selected routing ID; ``reported_model``
+    records CLI protocol metadata when available, not model self-identification.
+    Only omitted Codex effort inherits the legacy environment setting.
+    """
+    if model.startswith("router/"):
+        from autoresearch.llm_router import complete_routed
+
+        return complete_routed(model, messages)
     provider, name = split_cli_model(model)
-    if CLI_RETRIES < 1 or CLI_TIMEOUT <= 0 or CLI_STARTUP_TIMEOUT <= 0:
+    _validate_effort(provider, effort)
+    attempts = CLI_RETRIES if max_attempts is None else max_attempts
+    if isinstance(attempts, bool) or not isinstance(attempts, int) or attempts < 1:
+        raise ValueError("max_attempts must be a positive integer")
+    if CLI_TIMEOUT <= 0 or CLI_STARTUP_TIMEOUT <= 0:
         raise CLIError("CLI retries and timeouts must be positive")
     system, prompt, images = flatten_messages(messages)
     root = _scratch_root(provider)
     os.makedirs(root, exist_ok=True)
 
     last_err = None
-    for attempt in range(CLI_RETRIES):
+    for attempt in range(attempts):
         workdir = tempfile.mkdtemp(prefix=f"{provider}_", dir=root)
         try:
-            text, usage = _RUNNERS[provider](name, system, prompt, images, workdir)
+            text, usage = _RUNNERS[provider](name, system, prompt, images, workdir, effort=effort)
             if not isinstance(text, str) or not text.strip():
                 raise CLIError(f"{provider} returned an empty completion")
-            return text, usage
+            return text, {**usage, "model": model}
         except CLIError as e:
             last_err = e
             if "was not found on PATH" in str(e):
@@ -602,10 +700,10 @@ def complete(model: str, messages: list[dict]) -> tuple[str, dict]:
             # startup hangs are not rate limits: retry right away
             wait = 2 if "hung at startup" in str(e) else 15 * (3**attempt)
             logger.warning(
-                f"{model} call failed (attempt {attempt + 1}/{CLI_RETRIES}): {e}. "
-                f"Retrying in {wait}s"
+                f"CLI call failed (attempt {attempt + 1}/{attempts}; {type(e).__name__}). "
+                + (f"Retrying in {wait}s" if attempt + 1 < attempts else "No attempts remain")
             )
-            if attempt + 1 < CLI_RETRIES:
+            if attempt + 1 < attempts:
                 time.sleep(wait)
         finally:
             shutil.rmtree(workdir, ignore_errors=True)
@@ -664,13 +762,18 @@ class _Completions:
             "cached": 0,
             "reasoning": 0,
         }
+        selected_models = []
         for i in range(n or 1):
             text, usage = complete(model, messages or [])
+            actual_model = usage.get("model", model)
+            selected_models.append(actual_model)
             for k in totals:
                 totals[k] += usage.get(k, 0)
             choices.append(
                 SimpleNamespace(
                     index=i,
+                    model=actual_model,
+                    usage=dict(usage),
                     message=SimpleNamespace(
                         role="assistant", content=text, tool_calls=None
                     ),
@@ -679,7 +782,9 @@ class _Completions:
             )
         return SimpleNamespace(
             id=f"cli-{uuid.uuid4().hex}",
-            model=model,
+            # Mixed batches have no single provider attribution. Consumers may
+            # inspect choice.model; never label all tokens as the last provider.
+            model=selected_models[0] if len(set(selected_models)) == 1 else "router/mixed",
             created=int(time.time()),
             choices=choices,
             system_fingerprint=None,

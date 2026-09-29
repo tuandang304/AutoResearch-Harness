@@ -1,4 +1,5 @@
 # path to the task data directory
+llm_config: configs/llm.yaml
 data_dir: "data"
 preprocess_data: False
 
@@ -30,7 +31,7 @@ exec:
 generate_report: True
 # LLM settings for final report from journal
 report:
-  model: codex/gpt-6-sol
+  model: router/summary
   temp: 1.0
 
 experiment:
@@ -40,9 +41,10 @@ debug:
   stage4: False
 
 # agent hyperparams
+# Legacy concrete Codex overrides only; routed profiles have per-call effort.
 codex_reasoning_effort: low
 agent:
-  orchestrator: {model: codex/gpt-6-astra, temp: 0.2}
+  orchestrator: {model: router/orchestrator, temp: 0.2}
   type: parallel
   num_workers: 1
   stages:
@@ -63,18 +65,18 @@ agent:
 
   # LLM settings for coding
   code:
-    model: codex/gpt-6-sol
+    model: router/code
     temp: 1.0
     max_tokens: 12000
 
   # LLM settings for evaluating program output / tracebacks
   feedback:
-    model: codex/gpt-6-sol
+    model: router/feedback
     temp: 0.5
     max_tokens: 8192
 
   vlm_feedback:
-    model: codex/gpt-6-sol
+    model: router/vision
     temp: 0.5
     max_tokens: null
 
@@ -84,9 +86,9 @@ agent:
     num_drafts: 3
 
   summary:
-    model: codex/gpt-6-sol
+    model: router/summary
     temp: 0.3
 
   select_node:
-    model: codex/gpt-6-astra
+    model: router/orchestrator
     temp: 0.3

@@ -117,6 +117,7 @@ class Config(Hashable):
     experiment: ExperimentConfig
     debug: DebugConfig
     codex_reasoning_effort: Optional[str] = None
+    llm_config: Optional[str] = None
 
 
 def _get_next_logindex(dir: Path) -> int:

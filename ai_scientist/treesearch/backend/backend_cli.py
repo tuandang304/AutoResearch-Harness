@@ -68,7 +68,7 @@ def query(
             attempt_messages = messages + [{"role": "user", "content": feedback}]
         text, usage = complete(model, attempt_messages)
         token_tracker.add_tokens(
-            model,
+            usage.get("model", model),
             usage.get("prompt", 0),
             usage.get("completion", 0),
             usage.get("reasoning", 0),
@@ -96,4 +96,4 @@ def query(
             f"{model} did not return valid JSON for `{name}`: {text[:500]}"
         )
 
-    return output, time.time() - t0, in_tokens, out_tokens, {"model": model}
+    return output, time.time() - t0, in_tokens, out_tokens, {"model": usage.get("model", model)}

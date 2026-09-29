@@ -46,6 +46,7 @@ def parse_arguments(argv=None):
     parser.add_argument("--project", type=Path, default=ROOT / "projects" / "regularization",
                         help="Project directory containing ideas.json and optional config.yaml")
     parser.add_argument("--config", type=Path, help="Override project config.yaml or configs/default.yaml")
+    parser.add_argument("--llm-config", type=Path, help="Override the LLM routing policy")
     parser.add_argument("--output-dir", type=Path, help="Override project runs/ directory")
     parser.add_argument("--num-workers", type=int, help="Override agent.num_workers")
     parser.add_argument("--orchestrator-model", help="Model for research decisions, final writing and review")
@@ -252,6 +253,7 @@ def run_pipeline(args, idea, config):
     os.makedirs(idea_dir, exist_ok=False)
     args.run_dir = Path(idea_dir)
     os.environ["AUTORESEARCH_USAGE_LOG"] = str(Path(idea_dir) / "usage.jsonl")
+    snapshot_llm_policy(args, config)
 
     # Convert idea json to markdown file
     idea_path_md = osp.join(idea_dir, "idea.md")
@@ -468,12 +470,30 @@ def cleanup_children(previous):
             pass
 
 
+def snapshot_llm_policy(args, config):
+    """Freeze the already validated policy before any experiment/model calls."""
+    if not getattr(args, "llm_policy", None):
+        return
+    import yaml
+
+    snapshot = args.run_dir / "llm_policy.yaml"
+    with snapshot.open("w") as dest:
+        yaml.safe_dump(args.llm_policy, dest, sort_keys=False)
+    config["llm_config"] = str(snapshot)
+    os.environ["AUTORESEARCH_LLM_CONFIG"] = str(snapshot)
+    os.environ["AUTORESEARCH_ROUTING_LOG"] = str(args.run_dir / "routing.jsonl")
+    os.environ.setdefault("AUTORESEARCH_ROUTER_STATE", str(ROOT / ".state" / "llm-router.sqlite"))
+
+
 def main(argv=None):
     args = parse_arguments(argv)
     previous = None
     previous_cwd = Path.cwd()
-    previous_usage_log = os.environ.get("AUTORESEARCH_USAGE_LOG")
-    previous_effort = os.environ.get("AUTORESEARCH_CODEX_REASONING_EFFORT")
+    previous_env = {key: os.environ.get(key) for key in (
+        "AI_SCIENTIST_ROOT", "AUTORESEARCH_USAGE_LOG",
+        "AUTORESEARCH_CODEX_REASONING_EFFORT", "AUTORESEARCH_LLM_CONFIG",
+        "AUTORESEARCH_ROUTING_LOG", "AUTORESEARCH_ROUTER_STATE",
+    )}
     try:
         args.project = args.project.resolve()
         if not args.project.is_dir():
@@ -488,9 +508,14 @@ def main(argv=None):
         args.load_ideas = str(Path(args.load_ideas).resolve())
         args.config = args.config.resolve()
         args.output_dir = args.output_dir.resolve()
+        selected_policy = args.llm_config or os.environ.get("AUTORESEARCH_LLM_CONFIG")
+        if selected_policy is None and (args.project / "llm.yaml").is_file():
+            selected_policy = args.project / "llm.yaml"
+        args.llm_policy = {}
         config = load_run_config(
             args.config, args.provider, args.exec_backend, args.num_workers,
             args.orchestrator_model, args.worker_model,
+            llm_config=selected_policy, llm_policy=args.llm_policy,
         )
         idea = load_idea(args.load_ideas, args.idea_idx)
         for name in MODEL_FLAGS:
@@ -499,6 +524,14 @@ def main(argv=None):
                 if config["agent"].get("orchestrator") and name in ("model_writeup", "model_review"):
                     role = "orchestrator"
                 setattr(args, name, config["agent"][role]["model"])
+                if args.llm_policy and not args.provider:
+                    paper_roles = {"model_writeup": "writeup", "model_review": "review"}
+                    helper_roles = {"model_citation": "citation", "model_writeup_small": "writing",
+                                    "model_agg_plots": "plotting"}
+                    if name in paper_roles and not args.orchestrator_model:
+                        setattr(args, name, "router/" + paper_roles[name])
+                    elif name in helper_roles and not args.worker_model:
+                        setattr(args, name, "router/" + helper_roles[name])
         if args.load_code and not Path(args.load_ideas).with_suffix(".py").is_file():
             raise ValueError("--load_code needs a Python file next to the ideas JSON")
         if args.add_dataset_ref and not (ROOT / "hf_dataset_reference.py").is_file():
@@ -513,6 +546,7 @@ def main(argv=None):
                         "project": str(args.project),
                         "output_dir": str(args.output_dir),
                         "config": config,
+                        "llm_policy": args.llm_policy or None,
                         "models": {
                             k: v
                             for k, v in vars(args).items()
@@ -550,17 +584,16 @@ def main(argv=None):
             if getattr(args, "run_dir", None) is not None:
                 save_token_tracker(args.run_dir)
         finally:
-            if previous is not None:
-                cleanup_children(previous)
-            os.chdir(previous_cwd)
-            if previous_effort is None:
-                os.environ.pop("AUTORESEARCH_CODEX_REASONING_EFFORT", None)
-            else:
-                os.environ["AUTORESEARCH_CODEX_REASONING_EFFORT"] = previous_effort
-            if previous_usage_log is None:
-                os.environ.pop("AUTORESEARCH_USAGE_LOG", None)
-            else:
-                os.environ["AUTORESEARCH_USAGE_LOG"] = previous_usage_log
+            try:
+                if previous is not None:
+                    cleanup_children(previous)
+            finally:
+                os.chdir(previous_cwd)
+                for key, value in previous_env.items():
+                    if value is None:
+                        os.environ.pop(key, None)
+                    else:
+                        os.environ[key] = value
 
 
 if __name__ == "__main__":

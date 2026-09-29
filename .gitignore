@@ -202,3 +202,4 @@ remote_executor.json
 projects/*/runs/
 projects/*/archive/
 projects/*/artifacts/
+.state/

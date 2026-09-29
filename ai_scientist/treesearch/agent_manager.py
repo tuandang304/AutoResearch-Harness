@@ -6,6 +6,7 @@ from pathlib import Path
 import logging
 from .parallel_agent import ParallelAgent
 from autoresearch.llm_strategy import decision_model
+from autoresearch.llm_router import RouterUnavailable
 from .journal import Journal, Node
 import copy
 import re
@@ -386,6 +387,8 @@ Your research idea:\n\n
                     f"[yellow]Stage {current_substage.name} not complete. Missing: {missing}[/yellow]"
                 )
                 return False, "Missing criteria: " + missing
+        except RouterUnavailable:
+            raise
         except Exception as e:
             logger.error(
                 f"Error in sub-stage {current_substage.name} completion evaluation: {e}"
@@ -486,6 +489,8 @@ Your research idea:\n\n
                         f"[yellow]Stage {stage.name} not complete. Missing: {missing}[/yellow]"
                     )
                     return False, "Missing criteria: " + missing
+            except RouterUnavailable:
+                raise
             except Exception as e:
                 logger.error(f"Error in stage 2 completion evaluation: {e}")
                 return False, "Error in stage 2 completion evaluation"
@@ -620,6 +625,8 @@ Your research idea:\n\n
 
             return goal_str.strip(), response["sub_stage_name"]
 
+        except RouterUnavailable:
+            raise
         except Exception as e:
             logger.error(f"Error generating sub-stage goals: {e}")
             # Provide fallback goals if LLM fails
@@ -1021,6 +1028,8 @@ Your research idea:\n\n
             )
             return response
 
+        except RouterUnavailable:
+            raise
         except Exception as e:
             logger.error(f"Error getting LLM response: {e}")
             # Provide a fallback configuration in case of errors
@@ -1202,6 +1211,8 @@ Your research idea:\n\n
 
             return evaluation
 
+        except RouterUnavailable:
+            raise
         except Exception as e:
             logger.error(f"Error in stage progression evaluation: {e}")
             return {

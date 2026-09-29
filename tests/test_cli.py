@@ -1,4 +1,5 @@
 import os
+import json
 from pathlib import Path
 import sys
 import tempfile
@@ -17,6 +18,133 @@ from ai_scientist.utils.token_tracker import (
 
 
 class CLITests(unittest.TestCase):
+    def test_claude_error_metadata_and_safe_logging(self):
+        events = [
+            {"type": "system", "subtype": "init", "model": "claude-opus-5-5"},
+            {"type": "assistant", "error": "rate_limit", "errors": ["token=secret-value https://example.org/?token=private"]},
+            {"type": "result", "subtype": "success", "is_error": True},
+        ]
+        with tempfile.TemporaryDirectory() as cwd, patch.object(
+            cli_llm, "_run_streaming", return_value=list(map(json.dumps, events))
+        ):
+            with self.assertRaises(cli_llm.CLIError) as caught:
+                cli_llm._run_claude_code("claude-opus-5-5", "", "hi", [], cwd, effort="medium")
+        metadata = caught.exception.metadata
+        self.assertEqual(metadata["error_code"], "rate_limit")
+        self.assertEqual(metadata["reported_model"], "claude-opus-5-5")
+        self.assertEqual(metadata["initialized_model"], "claude-opus-5-5")
+        self.assertNotIn("secret-value", json.dumps(metadata))
+        self.assertNotIn("private", json.dumps(metadata))
+        from unittest.mock import Mock
+        with patch.dict(cli_llm._RUNNERS, codex=Mock(side_effect=cli_llm.CLIError("SECRET PROMPT"))), self.assertLogs("ai-scientist") as logs:
+            with self.assertRaises(cli_llm.CLIError):
+                cli_llm.complete("codex/test", [], max_attempts=1)
+        self.assertNotIn("SECRET PROMPT", str(logs.output))
+
+    def test_verification_identity_matches_and_mismatches(self):
+        from scripts.verify_llm_profiles import identity_evidence, probe
+
+        for reported in ("gpt-6-sol", "codex/gpt-6-sol"):
+            self.assertEqual(identity_evidence("codex/gpt-6-sol", reported), "exact_metadata_match")
+        self.assertEqual(identity_evidence("codex/gpt-6-sol", None), "request_accepted_only")
+        with patch.object(cli_llm, "complete", return_value=("PROFILE_OK", {"reported_model": "gpt-6-luna"})):
+            records = probe(("codex/gpt-6-sol", "low"))
+        self.assertEqual(records[0]["status"], "model_mismatch")
+
+    def test_verifier_refuses_unowned_artifact_before_calls(self):
+        from scripts.verify_llm_profiles import main
+
+        with tempfile.TemporaryDirectory() as cwd:
+            target = Path(cwd) / "existing.json"
+            target.write_text('{"user_owned": true}')
+            with patch.object(sys, "argv", ["verify", "--live", "--output", str(target)]), patch.object(cli_llm, "complete") as complete, patch("sys.stderr"):
+                with self.assertRaises(SystemExit):
+                    main()
+            complete.assert_not_called()
+            self.assertEqual(target.read_text(), '{"user_owned": true}')
+
+    def test_router_dispatch_and_batch_attribution(self):
+        from unittest.mock import Mock
+
+        routed = Mock(return_value=("ok", {"model": "codex/gpt-6-sol"}))
+        with patch.dict(sys.modules, {"autoresearch.llm_router": NS(complete_routed=routed)}):
+            self.assertTrue(cli_llm.is_cli_model("router/worker"))
+            self.assertNotIn("router", cli_llm.CLI_PROVIDERS)
+            client = cli_llm.CLIClient("router/worker")
+            response = client.chat.completions.create(messages=[])
+            self.assertEqual(response.model, "codex/gpt-6-sol")
+            routed.assert_called_once_with("router/worker", [])
+        with patch.object(cli_llm, "complete", side_effect=[
+            ("a", {"model": "codex/gpt-6-sol", "prompt": 2}),
+            ("b", {"model": "claude-code/claude-opus-5-5", "prompt": 3}),
+        ]):
+            response = client.chat.completions.create(messages=[], n=2)
+        self.assertEqual(response.model, "router/mixed")
+        self.assertEqual(response.usage.prompt_tokens, 5)
+        self.assertEqual([c.usage["prompt"] for c in response.choices], [2, 3])
+        self.assertEqual([c.model for c in response.choices], ["codex/gpt-6-sol", "claude-code/claude-opus-5-5"])
+
+    def test_per_call_effort_flags_and_metadata(self):
+        cases = [
+            ("claude-code", cli_llm._run_claude_code, [
+                {"type": "assistant", "message": {"model": "reported-id"}},
+                {"type": "result", "subtype": "success", "result": "ok"},
+            ]),
+            ("codex", cli_llm._run_codex, [
+                {"type": "session.created", "model": "reported-id"},
+                {"type": "item.completed", "item": {"type": "agent_message", "text": "ok"}},
+                {"type": "turn.completed", "usage": {}},
+            ]),
+            ("antigravity", cli_llm._run_antigravity, [
+                {"event": "result", "result": {"status": "SUCCESS", "response": "ok", "model": "reported-id"}},
+            ]),
+        ]
+        with tempfile.TemporaryDirectory() as cwd, patch.dict(
+            os.environ, {"AUTORESEARCH_CODEX_REASONING_EFFORT": "high"}
+        ):
+            for provider, runner, events in cases:
+                with self.subTest(provider=provider), patch.object(
+                    cli_llm, "_run_streaming", return_value=list(map(json.dumps, events))
+                ) as run:
+                    for effort in ("low", "medium"):
+                        _, usage = runner("selected-id", "", "ok", [], cwd, effort=effort)
+                        cmd = run.call_args.args[0]
+                        flag = "-c" if provider == "codex" else "--effort"
+                        expected = f'model_reasoning_effort="{effort}"' if provider == "codex" else effort
+                        self.assertEqual(cmd[cmd.index(flag) + 1], expected)
+                        self.assertEqual(usage["reported_model"], "reported-id")
+                    with self.assertRaises(ValueError):
+                        runner("selected-id", "", "ok", [], cwd, effort="invalid")
+                    if provider != "codex":
+                        runner("selected-id", "", "ok", [], cwd)
+                        self.assertNotIn("--effort", run.call_args.args[0])
+                    self.assertEqual(os.environ["AUTORESEARCH_CODEX_REASONING_EFFORT"], "high")
+
+    def test_complete_effort_attempts_and_exact_model(self):
+        from unittest.mock import Mock
+
+        runner = Mock(side_effect=[cli_llm.CLIError("startup"), ("ok", {"reported_model": "actual"})])
+        with patch.dict(cli_llm._RUNNERS, codex=runner), patch.object(cli_llm.time, "sleep"):
+            _, usage = cli_llm.complete("codex/exact-id", [], effort="low", max_attempts=2)
+        self.assertEqual(runner.call_count, 2)
+        self.assertEqual(runner.call_args.kwargs, {"effort": "low"})
+        self.assertEqual(usage["model"], "codex/exact-id")
+        self.assertEqual(usage["reported_model"], "actual")
+        runner.reset_mock(side_effect=True)
+        runner.side_effect = cli_llm.CLIError("failure")
+        with patch.dict(cli_llm._RUNNERS, codex=runner), patch.object(cli_llm.time, "sleep") as sleep:
+            with self.assertRaises(cli_llm.CLIError):
+                cli_llm.complete("codex/exact-id", [], max_attempts=1)
+            self.assertEqual(runner.call_count, 1)
+            sleep.assert_not_called()
+        for invalid in (0, -1, True, 1.5):
+            with self.assertRaises(ValueError):
+                cli_llm.complete("codex/exact-id", [], max_attempts=invalid)
+
+    def test_reported_model_never_reads_generated_text(self):
+        self.assertIsNone(cli_llm._reported_model({"result": "I am model X"}))
+        self.assertEqual(cli_llm._reported_model({"modelUsage": {"real-id": {}}}), "real-id")
+
     def test_codex_low_effort_is_explicit(self):
         events = ['{"type":"item.completed","item":{"type":"agent_message","text":"ok"}}', '{"type":"turn.completed","usage":{}}']
         with tempfile.TemporaryDirectory() as cwd, patch.dict(

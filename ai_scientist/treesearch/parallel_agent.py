@@ -1,5 +1,6 @@
 from concurrent.futures import ProcessPoolExecutor
 from autoresearch.llm_strategy import decision_model
+from autoresearch.llm_router import RouterUnavailable
 from typing import List, Optional, Set, Any, Callable, cast, Dict, Tuple
 import random
 import subprocess
@@ -1115,6 +1116,8 @@ class MinimalAgent:
                         else:
                             logger.warning(f"Invalid plot path received: {plot_path}")
 
+            except RouterUnavailable:
+                raise
             except Exception as e:
                 logger.error(
                     f"Error in plot selection: {str(e)}; falling back to first 10 plots"
@@ -1476,6 +1479,8 @@ class ParallelAgent:
                     raise RuntimeError(f"Smoke seed evaluation failed: {result_node.analysis}")
                 seed_nodes.append(self.journal.get_node_by_id(result_node.id))
                 print("Added result node to journal")
+            except RouterUnavailable:
+                raise
             except Exception as e:
                 logger.error(f"Error in multi-seed evaluation: {str(e)}")
                 raise
@@ -1557,6 +1562,8 @@ class ParallelAgent:
                     if process_interpreter:
                         process_interpreter.cleanup_session()
 
+            except RouterUnavailable:
+                raise
             except Exception as e:
                 print(f"Error in seed result aggregation: {str(e)}")
 
@@ -1821,6 +1828,8 @@ class ParallelAgent:
                         child_node.metric = WorstMetricValue()
                         child_node.is_buggy = True
 
+                except RouterUnavailable:
+                    raise
                 except Exception as e:
                     logger.error(
                         f"Error parsing metrics for node {child_node.id}: {str(e)}"
@@ -1934,6 +1943,8 @@ class ParallelAgent:
                             )
                             logger.debug(f"Plot absolute path: {final_path.absolute()}")
                             logger.debug(f"Plot web path: {web_path}")
+                except RouterUnavailable:
+                    raise
                 except Exception as e:
                     logger.error(
                         f"Error generating plots for node {child_node.id}: {str(e)}"
@@ -1945,6 +1956,8 @@ class ParallelAgent:
                         logger.info(
                             f"Generated VLM analysis for plots in node {child_node.id}"
                         )
+                    except RouterUnavailable:
+                        raise
                     except Exception as e:
                         logger.error(
                             f"Error analyzing plots for node {child_node.id}: {str(e)}"
@@ -2347,6 +2360,9 @@ class ParallelAgent:
                 self.journal.append(result_node)
                 print("Added result node to journal")
 
+            except RouterUnavailable:
+                # Stop the run; retrying this node would repeat an experiment.
+                raise
             except TimeoutError:
                 future.cancel()
                 raise TimeoutError(

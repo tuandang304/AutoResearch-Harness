@@ -18,11 +18,17 @@ Keep ai_scientist imports and AI_SCIENTIST_* compatibility settings intact.
 
 ## Models and execution
 
-Orchestrator: codex/gpt-6-astra. Worker: codex/gpt-6-sol. Both low effort.
-The launcher scopes AUTORESEARCH_CODEX_REASONING_EFFORT to each run and children.
-Do not silently substitute models. Provider presets precede explicit role flags.
-Routing lives in autoresearch/llm_strategy.py, agent_manager.py and parallel_agent.py.
-Workers use agent.code/feedback; final writing/review inherit the orchestrator.
+Read docs/llm-routing.md. configs/llm.yaml pins claude-opus-5-5 medium as
+orchestrator. Workers: gpt-6-sol, gpt-6-luna, gpt-6-astra, claude-opus-5-5 low;
+gemini-3.8-flash high. Opus workers are last-resort, sharing orchestrator quota.
+Do not silently substitute IDs or effort. Policy binds before provider/model overrides.
+autoresearch/llm_router.py owns assignment, shared cooldowns and per-call provenance.
+cli_llm.py translates per-call effort; legacy Codex env settings remain supported.
+Policy loading/dry runs must never touch SQLite or call a model. Live policy is
+snapshotted per run; SQLite availability is shared across processes, not hosts.
+Model strengths are cited hypotheses, not measured rankings. Keep live probes
+opt-in; never claim a model's self-description verifies its serving identity.
+Propagate RouterUnavailable without turning it into an experimental result.
 
 Colab training uses ai_scientist/remote/ and remote_interpreter.py. Local
 postprocessing is optional. Keep exp_name: run because artifact consumers rely

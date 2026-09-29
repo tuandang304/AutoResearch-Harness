@@ -10,6 +10,7 @@ Each research project owns its inputs and outputs.
 autoresearch/                 Entry point, configuration and model strategy
 ai_scientist/                 Research engine, adapters, execution and writing
 configs/default.yaml         Shared defaults
+configs/llm.yaml             Exact model profiles, instructions and fallback policy
 projects/
   _template/                 Copyable structure for a new study
   regularization/            Runnable illustrative study
@@ -66,9 +67,17 @@ selects projects/regularization. Always select your study for real research.
 
 ## Models
 
-Default orchestrator: **codex/gpt-6-astra**. Worker: **codex/gpt-6-sol**.
-Both use **low reasoning effort**, configured by `codex_reasoning_effort: low`.
-The launcher passes this to Codex subprocesses without editing personal settings.
+Default orchestrator: **Claude Opus 5.5, medium effort**. Worker pool:
+**GPT-6-Sol, GPT-6-Luna, GPT-6-Astra and Opus 5.5 at low effort**, plus
+**Gemini 3.8 Flash at high effort**. Exact IDs, task instructions and quota groups
+live in [configs/llm.yaml](configs/llm.yaml).
+
+Opus selects coding/plotting workers from their documented task strengths;
+routine roles use priority pools. Rate limits trigger bounded, quota-aware
+fallback. Opus workers are last-resort to conserve orchestrator availability.
+Pinned orchestration never silently substitutes another model.
+See [routing and model research](docs/llm-routing.md) for behavior, limitations,
+policy precedence and opt-in live ID verification.
 
 The orchestrator decides stages, proposes tuning/ablations, selects results, and
 writes/reviews the final paper. Workers implement/debug code, extract metrics,
@@ -77,7 +86,10 @@ generate/review plots, summarize results and assist writing.
 Override assignments with `--orchestrator-model` and `--worker-model`. Paper-role
 flags (`--model_writeup`, `--model_review`, `--model_citation`,
 `--model_writeup_small`, `--model_agg_plots`) take precedence for their stages.
-Vision roles need image-capable models. CLI temperature/max-token arguments are
+`--llm-config PATH` selects a policy; projects may provide their own `llm.yaml`.
+Concrete model overrides bypass pool routing. Vision roles need image-capable models.
+Effort is passed per call without changing personal CLI settings.
+CLI temperature/max-token arguments are
 not enforced. Actual costs depend on provider billing and retries.
 
 `--provider claude-code`, `--provider codex`, and `--provider antigravity` select
@@ -103,6 +115,7 @@ Runs live in `projects/<study>/runs/<timestamp>_<idea>_attempt_<id>/` unless
 `--output-dir` is supplied. A run retains input snapshots, resolved
 `bfts_config.yaml`, status, experiment artifacts under `logs/0-run/`, token usage,
 and generated figures, LaTeX, PDFs and reviews when their stages finish.
+Routed runs also retain a policy snapshot and `routing.jsonl` model provenance.
 Failures preserve outputs. Automatic full-run resume is not implemented.
 
 - `--load_ideas PATH --idea_idx N`: select alternate ideas or a candidate.

@@ -3,6 +3,7 @@
 import copy
 import json
 import math
+import os
 from pathlib import Path
 import re
 
@@ -20,6 +21,8 @@ def validate_config(config):
         if not isinstance(config.get(section), dict):
             raise ValueError(f"Configuration needs a {section} mapping")
     agent, execution = config["agent"], config["exec"]
+    if config.get("llm_config") is not None and not isinstance(config["llm_config"], str):
+        raise ValueError("llm_config must be a path string or null")
     effort = config.get("codex_reasoning_effort")
     if effort is not None and effort not in ("none", "minimal", "low", "medium", "high", "xhigh", "max"):
         raise ValueError("Invalid codex_reasoning_effort")
@@ -108,12 +111,34 @@ def validate_config(config):
     return config
 
 
-def load_run_config(path, provider=None, backend=None, workers=None, orchestrator=None, worker=None):
+def load_run_config(path, provider=None, backend=None, workers=None, orchestrator=None, worker=None,
+                    llm_config=None, llm_policy=None):
+    """Load and bind once; optionally copy the validated policy into llm_policy.
+
+    Explicit policy paths (including project selection by the launcher) override
+    the environment. Config-file paths are relative to the repository root.
+    """
     with Path(path).open() as source:
         config = yaml.safe_load(source)
     if not isinstance(config, dict):
         raise ValueError("Configuration must be a YAML mapping")
     config = copy.deepcopy(config)
+    selected = llm_config or os.environ.get("AUTORESEARCH_LLM_CONFIG")
+    if selected is None and config.get("llm_config") is not None:
+        if not isinstance(config["llm_config"], str):
+            raise ValueError("llm_config must be a path string or null")
+        selected = ROOT / config["llm_config"]
+    if llm_policy is not None:
+        llm_policy.clear()
+    if selected is not None:
+        from autoresearch.llm_router import load_policy, bind_roles
+
+        selected = Path(selected).expanduser().resolve()
+        policy = load_policy(selected)
+        bind_roles(config, policy)
+        config["llm_config"] = str(selected)
+        if llm_policy is not None:
+            llm_policy.update(copy.deepcopy(policy))
     if provider:
         preset = PROVIDER_PRESETS[provider]
         agent = config.setdefault("agent", {})

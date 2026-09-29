@@ -191,6 +191,18 @@ def record_response(result, model=None, prompt=None, system_message=None):
     usage = getattr(result, "usage", None)
     if usage is None:
         return  # high-level helpers return (text, history), already counted below
+    choices = getattr(result, "choices", [])
+    # CLI batches may switch providers between choices. Attribute each accepted
+    # completion once rather than billing all tokens to the requested router alias.
+    if choices and all(isinstance(getattr(c, "usage", None), dict) for c in choices):
+        for choice in choices:
+            actual = choice.model
+            counts = choice.usage
+            token_tracker.add_tokens(actual, counts.get("prompt", 0), counts.get("completion", 0),
+                                     counts.get("reasoning", 0), counts.get("cached", 0))
+            token_tracker.add_interaction(actual, system_message, prompt,
+                                          choice.message.content, getattr(result, "created", None))
+        return
     model = getattr(result, "model", None) or model or "unknown"
     anthropic_usage = hasattr(usage, "input_tokens")
     if anthropic_usage:

@@ -8,6 +8,8 @@ and `ai_scientist` package remain compatible with existing scripts.
 | Path | Responsibility |
 |---|---|
 | `autoresearch/config.py` | Validate ideas/config and resolve provider overrides |
+| `autoresearch/llm_router.py` | Profile validation, task assignment, shared quota state and audit |
+| `configs/llm.yaml` | Exact model IDs, effort, capability declarations and task instructions |
 | `autoresearch/llm_strategy.py` | Orchestrator/worker role assignments |
 | `configs/default.yaml` | Topic-independent runtime defaults |
 | `projects/` | Independent study inputs and ignored run artifacts |
@@ -56,10 +58,14 @@ notebook embeddings.
   process-local; CLI billing cannot be inferred from token counts alone.
 - API model support differs between the text, vision and tree-search layers.
   These adapters have not all been migrated to a single provider interface.
+  Profile routing currently targets the three CLI adapters, not API backends.
 - The LaTeX templates and summary consumers expect the standard `run` experiment
   name. Use `--output-dir` for an alternate output location.
 
 ## Changes in this development update
+
+See [model routing](llm-routing.md) for profile selection, live verification,
+model-strength sources, bounded failover and actual-model usage attribution.
 
 Project selection resolves inputs and output directories before execution. See
 [project workflow](projects.md) for precedence and historical migration details.
