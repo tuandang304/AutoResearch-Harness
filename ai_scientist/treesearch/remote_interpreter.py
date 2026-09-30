@@ -35,7 +35,7 @@ logger = logging.getLogger("ai-scientist")
 
 POLL_SECONDS = 5
 REQUEST_TIMEOUT = 90  # below Cloudflare's ~100s quick-tunnel response limit
-RECOVER_AFTER = 60  # seconds unreachable before asking the Colab manager to reconnect
+RECOVER_AFTER = 180  # seconds unreachable before reconnecting; most tunnel blips last < 1 min
 
 
 class RemoteExecutorUnavailable(RuntimeError):
@@ -302,7 +302,11 @@ class RemoteInterpreter:
                 continue
             self._tier, self._replica, self._executor = placed.tier, placed.key, placed.path
             notes += placed.notes
-            result, received = self._execute(code, tgz_b64, sent)
+            release = lambda: pool.release(placed.key, placed.token)  # noqa: E731
+            try:
+                result, received = self._execute(code, tgz_b64, sent, on_submitted=release)
+            finally:
+                release()
             if rerun or not colab.is_oom(result):
                 break
             # One re-run of the same code and uploaded snapshot: alone on this tier
@@ -340,7 +344,8 @@ class RemoteInterpreter:
         })
         return result
 
-    def _execute(self, code: str, tgz_b64: str, sent: set[str]) -> tuple[ExecutionResult, set[str]]:
+    def _execute(self, code: str, tgz_b64: str, sent: set[str],
+                 on_submitted=None) -> tuple[ExecutionResult, set[str]]:
         spec = {
             "job_id": uuid.uuid4().hex,
             "code": code,
@@ -358,6 +363,8 @@ class RemoteInterpreter:
             resp.raise_for_status()
             self._job_id = resp.json()["job_id"]
             logger.info(f"Submitted remote job {self._job_id} for {self.working_dir}")
+            if on_submitted:
+                on_submitted()
 
             status = None
             deadline = time.monotonic() + self.timeout + self.wait_minutes * 60 + 60

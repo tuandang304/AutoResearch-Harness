@@ -31,7 +31,7 @@ import zlib
 
 import numpy as np
 
-__version__ = "1.1"
+__version__ = "1.2"
 SYNTH_VERSION = "1.0"  # synthetic-dark evaluation sets (unchanged since 1.0)
 
 CACHE = Path(os.environ.get("UAV_CACHE", "/content/cache/visdrone"))
@@ -412,9 +412,13 @@ def train(data_yaml, name, epochs, imgsz, seed, batch=16, weights="yolo11s.pt", 
     so nothing is selected on held-out data. Pass extra Ultralytics arguments
     (lr0, optimizer, cos_lr, close_mosaic, ...) through overrides.
     """
+    import logging
+
     from ultralytics import YOLO
+    from ultralytics.utils import LOGGER
     import torch
 
+    LOGGER.setLevel(logging.WARNING)  # keep the argument dump out of the reviewed output
     RUNS.mkdir(parents=True, exist_ok=True)
     try:
         model = YOLO(weights)

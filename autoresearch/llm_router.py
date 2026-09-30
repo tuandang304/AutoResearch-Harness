@@ -5,7 +5,7 @@ not a general agent executor: only completion requests are retried, never experi
 """
 
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 import fcntl
 import hashlib
@@ -192,6 +192,11 @@ def classify_error(error):
     text = (str(error) + " " + str(metadata.get("error_code", ""))).lower()
     if any(s in text for s in ("unauthorized", "authentication", "not logged in", "login required", "401", "invalid api key")):
         return "authentication", True
+    # A provider's safety filter declined this prompt (possibly a false positive):
+    # another model may answer it; it says nothing about quota or credentials.
+    if any(s in text for s in ("safeguards flagged", "flagged this message", "can't respond to this message",
+                               "cannot respond to this message", "content filter", "usage policy")):
+        return "refusal", False
     if any(s in text for s in ("insufficient_quota", "quota exhausted", "usage limit", "weekly limit", "daily limit", "credit balance", "hit your limit")):
         return "quota", True
     if any(s in text for s in ("429", "rate limit", "rate_limit", "too many requests")):
@@ -226,6 +231,18 @@ def retry_after(error):
             return max(0, parsedate_to_datetime(match[1]).timestamp() - time.time())
         except (ValueError, TypeError):
             pass
+    # Codex: "... or try again at 1:30 AM." (local clock time of the next reset)
+    match = re.search(r"try again at (\d{1,2}):(\d{2})\s*([AP]M)?", text, re.I)
+    if match:
+        hour, minute = int(match[1]), int(match[2])
+        if match[3]:
+            hour = hour % 12 + (12 if match[3].upper() == "PM" else 0)
+        if hour < 24 and minute < 60:
+            now = datetime.now()
+            reset = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+            if reset <= now:
+                reset += timedelta(days=1)
+            return (reset - now).total_seconds() + 60  # small margin past the reset
     return None
 
 
@@ -354,6 +371,10 @@ def complete_routed(model, messages):
                        "elapsed_seconds": time.monotonic() - started})
                 if kind in {"authentication", "configuration", "unknown"}:
                     raise RouterUnavailable(f"{role}: {concrete} {kind} error; inspect CLI authentication/configuration") from error
+                if kind == "refusal":
+                    # this prompt only: try the next candidate, no cooldown
+                    order = [p for p in order if p != name]
+                    continue
                 key = f"quota:{group}" if shared else f"profile:{name}"
                 seconds = retry_after(error)
                 if kind == "rate_limit":

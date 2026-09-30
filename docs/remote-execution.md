@@ -187,6 +187,7 @@ across nodes only when they used the same GPU.
 | Session cap | At `max_sessions` VMs, the priciest idle one is stopped to make room. If all are busy, a job for a new tier waits up to 30 minutes; a scale-out is skipped and the job queues. |
 | Replica cap | At most `max_replicas` VMs per tier, and a scale-out needs 30 minutes of budget at that tier's rate. |
 | Release after tree search | The launcher stops every VM before plotting, write-up and review, which need no GPU. |
+| Keep-alive | GPU VMs whose kernel stayed inactive were reclaimed about 20-25 minutes after the last `colab exec` (three runs, CLI 0.7.4), even while the detached executor ran jobs; a CPU control was not. With the keep-alive, L4 VMs survived 40+ minutes. The watchdog runs a no-op `colab exec` on every live VM every 5 minutes. |
 | Idle stop | The watchdog stops a VM with no running or queued jobs, or with an unreachable executor, after its tier's `idle_stop_minutes` (global default otherwise). The next job re-provisions it. |
 | Budget | Spend is the larger of the balance drop and usage rate × time, polled every five minutes. At `max_compute_units` every VM stops and later jobs fail with `RemoteExecutorUnavailable`. The balance is account-wide, so other Colab use counts too. |
 | Controller exit | The detached watchdog stops and releases every VM when the launcher process no longer exists, including after SIGKILL. |

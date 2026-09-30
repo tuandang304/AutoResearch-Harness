@@ -382,6 +382,26 @@ class PoolTests(unittest.TestCase):
                 self.assertRaises(PoolClosed):
             interpreter._try_recover()
 
+    def test_simultaneous_placements_scale_out_before_either_job_is_submitted(self):
+        pool = self.managed(max_concurrent=1)
+        first, second = pool.acquire("T4"), pool.acquire("T4")
+        self.assertEqual((first.key, second.key), ("T4", "T4.2"))
+        pool.release(first.key, first.token)
+        pool.release(second.key, second.token)
+        self.assertEqual(pool.acquire("T4").key, "T4")  # reservations released
+
+    def test_watchdog_keeps_the_kernel_active(self):
+        pool = self.managed()
+        self.assertIsNone(self.run_job("print('up')").exc_type)
+        with pool.mutate() as state:
+            state["sessions"]["T4"]["keepalive_at"] = 0  # overdue
+        before = sum(c.startswith("exec") and " -f " not in c for c in self.calls())
+        pool.watch(once=True)
+        self.assertEqual(sum(c.startswith("exec") and " -f " not in c for c in self.calls()), before + 1)
+        self.assertGreater(pool.load()["sessions"]["T4"]["keepalive_at"], 0)
+        pool.watch(once=True)  # not due again yet
+        self.assertEqual(sum(c.startswith("exec") and " -f " not in c for c in self.calls()), before + 1)
+
     def background_job(self, code, results, name):
         thread = threading.Thread(target=lambda: results.__setitem__(name, self.run_job(code)))
         thread.start()
@@ -489,7 +509,8 @@ class PoolTests(unittest.TestCase):
         executor = self.dir / "remote_executor.json"
         pool = ColabPool.create({"selection": "fixed", "gpu": ["L4", "T4"], "packages": []},
                                 executor_path=executor, session="manual-exec")
-        tier, _, path, notes, _ = pool.acquire("A100")  # declarations are ignored in fixed mode
+        placed = pool.acquire("A100")  # declarations are ignored in fixed mode
+        tier, path, notes = placed.tier, placed.path, placed.notes
         self.assertEqual((tier, Path(path)), ("T4", executor.resolve()))
         self.assertEqual(self.vm_sessions(), ["manual-exec"])
         self.assertTrue(notes and notes[0].startswith("L4:"))

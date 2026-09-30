@@ -87,6 +87,9 @@ therefore cannot be directly transferred to this harness.
   rate limits block only the affected profile.
 - Quota exhaustion without a known reset blocks the group until explicitly
   rechecked/reset. It does not busy-loop across models sharing the account.
+- A reset time printed by the CLI ("try again at 1:30 AM") becomes the cooldown.
+- A provider safety-filter refusal ("safeguards flagged this message") moves that
+  call to the next candidate without a cooldown; pinned roles still fail.
 - Transient errors have bounded attempts. Authentication, configuration, unknown
   errors and serving-model mismatches are surfaced, not disguised as quota limits.
 - Output-format repairs remain bounded in the caller. They are not quota events.

@@ -104,7 +104,12 @@ PORT = 8765
 CLI_TIMEOUT = 300
 BOOTSTRAP_TIMEOUT = 600
 HEALTH_SECONDS = 180  # quick tunnels can take minutes to accept traffic
+SERVER_SETTLE_SECONDS = 120  # a busy live server gets this long to answer before replacement
 WATCH_SECONDS = 30
+# The Colab backend reclaims a VM whose kernel stays inactive for roughly 20-25
+# minutes (observed 2026-09-29); jobs run in a detached server, so the watchdog
+# executes a no-op in the kernel this often.
+KEEPALIVE_SECONDS = 300
 USAGE_SECONDS = 300
 ROOM_WAIT_SECONDS = 1800
 UNAVAILABLE_SECONDS = 1800  # entitlement/quota refusals
@@ -125,7 +130,9 @@ COMPUTE_LOG_ENV = "AUTORESEARCH_COMPUTE_LOG"
 
 
 # shared: the VM already had running/queued jobs when this one was placed.
-Placement = namedtuple("Placement", "tier key path notes shared")
+# token: the placement's load reservation, released once the job is submitted.
+Placement = namedtuple("Placement", "tier key path notes shared token", defaults=(None,))
+RESERVE_SECONDS = 900  # a placed but not yet submitted job counts as load this long
 
 
 class TierUnavailable(RemoteExecutorUnavailable):
@@ -160,6 +167,11 @@ def overloaded(health):
         return True
     fraction = gpu_memory_fraction(health)
     return bool(health.get("running") and fraction is not None and fraction >= OVERLOAD_MEMORY)
+
+
+def _reserved(entry, now=None):
+    now = time.time() if now is None else now
+    return sum(now - t < RESERVE_SECONDS for t in (entry.get("reserved") or {}).values())
 
 
 def _load(health):
@@ -462,22 +474,35 @@ def alive(pidfile):
     except Exception:
         return None
 
-def healthy():
+def healthy(timeout=5):
     req = urllib.request.Request(f"http://127.0.0.1:{{PORT}}/health",
                                  headers={{"Authorization": "Bearer " + token}})
     try:
-        with urllib.request.urlopen(req, timeout=5) as response:
+        with urllib.request.urlopen(req, timeout=timeout) as response:
             return json.load(response).get("protocol_version") == 2
     except Exception:
         return False
+
+def settled(pidfile, wait={SERVER_SETTLE_SECONDS}):
+    """A live server busy with training and evaluation may answer slowly; it is
+    replaced (killing its jobs) only if it stays unresponsive this long."""
+    deadline = time.time() + wait
+    while alive(pidfile):
+        if healthy(timeout=20):
+            return True
+        if time.time() >= deadline:
+            return False
+        time.sleep(5)
+    return False
 
 gpu = subprocess.run("nvidia-smi --query-gpu=name,memory.total --format=csv,noheader",
                      shell=True, capture_output=True, text=True)
 print("AISCI_GPU=" + (gpu.stdout.strip().splitlines() or ["none"])[0], flush=True)
 
 server_pid = os.path.join(BASE, "server.pid")
-if not (alive(server_pid) and healthy()):
+if not (alive(server_pid) and settled(server_pid)):
     if alive(server_pid):
+        print("AISCI_SERVER_WARNING=replacing an unresponsive live server", flush=True)
         os.killpg(alive(server_pid), signal.SIGTERM)
         time.sleep(3)
     packages = {packages!r}
@@ -673,18 +698,34 @@ class ColabPool:
             try:
                 with self.locked(f"place-{tier}"):  # one scale-out decision at a time
                     key, path, shared = self._place(tier, notes, exclusive)
-                return Placement(tier, key, path, notes, shared)
+                    token = uuid.uuid4().hex
+                    with self.mutate() as fresh:  # counted as load until submitted
+                        entry = fresh["sessions"][key]
+                        now = time.time()
+                        entry["reserved"] = {t: v for t, v in (entry.get("reserved") or {}).items()
+                                             if now - v < RESERVE_SECONDS} | {token: now}
+                return Placement(tier, key, path, notes, shared, token)
             except TierUnavailable as exc:
                 notes.append(str(exc))
         raise NoTierAvailable("No Colab tier could be allocated: " + "; ".join(notes))
 
+    def release(self, key, token):
+        """Drop a placement's load reservation (the executor now reports the job)."""
+        if token is None:
+            return
+        with self.mutate() as state:
+            (state["sessions"].get(key, {}).get("reserved") or {}).pop(token, None)
+
     def _place(self, tier, notes, exclusive=False):
-        """Least-loaded healthy replica with room; else start another one if allowed."""
+        """Least-loaded healthy replica with room; else start another one if allowed.
+        Jobs placed but not yet submitted count as queued."""
         state = self.load()
         keys = sorted((k for k, e in state["sessions"].items() if e.get("tier", k) == tier),
                       key=_replica_index) or [tier]
         up = {k: self.health(state["sessions"][k]) for k in keys
               if state["sessions"].get(k, {}).get("up")}
+        up = {k: h and dict(h, queued=h.get("queued", 0) + _reserved(state["sessions"][k]))
+              for k, h in up.items()}
         if not up:
             return keys[0], self.ensure(keys[0]), False
         free = [k for k, h in up.items() if h and (_load(h) == 0 if exclusive else not overloaded(h))]
@@ -805,7 +846,8 @@ class ColabPool:
         with self.mutate() as fresh:
             fresh.setdefault("start_balance", balance)
             current = self._entry(fresh, key)
-            current.update(provisions=current["provisions"] + 1, provisioned_at=time.time())
+            current.update(provisions=current["provisions"] + 1, provisioned_at=time.time(),
+                           keepalive_at=time.time())
             if after is not None and after > before:
                 current["measured_rate"] = round(after - before, 3)
 
@@ -931,6 +973,7 @@ class ColabPool:
             running = [t for t, e in state["sessions"].items() if e.get("up")]
             for tier in running:
                 entry = state["sessions"][tier]
+                self._keepalive(tier, entry, now)
                 last_busy = entry.get("last_busy") or entry.get("provisioned_at") or now
                 if self._busy(entry):
                     last_busy = now
@@ -948,6 +991,22 @@ class ColabPool:
             if once:
                 return None
             time.sleep(poll)
+
+    def _keepalive(self, key, entry, now):
+        """No-op kernel execution so Colab does not reclaim a VM whose work runs
+        outside the kernel. Failures (network blips) are retried next poll."""
+        last = entry.get("keepalive_at")
+        last = (entry.get("provisioned_at") or now) if last is None else last
+        if now - last < KEEPALIVE_SECONDS:
+            return
+        try:
+            code, _, _ = self.cli.run("exec", "-s", entry["session"], "--timeout", "30",
+                                      stdin_text="pass", timeout=90, check=False)
+        except RemoteExecutorUnavailable:
+            return
+        if code == 0:
+            with self.mutate() as fresh:
+                self._entry(fresh, key)["keepalive_at"] = now
 
     def _account(self, interval):
         """Budget check from balance delta, or rate x interval when the balance lags.

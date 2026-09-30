@@ -158,12 +158,23 @@ class RouterTests(unittest.TestCase):
             "connection timed out": ("transient", False),
             "503 overloaded": ("transient", False),
             "unexpected response": ("unknown", False),
+            "API Error: Sonnet 5.5's safeguards flagged this message": ("refusal", False),
         }
         for message, expected in cases.items():
             with self.subTest(message=message):
                 self.assertEqual(classify_error(CLIError(message)), expected)
         self.assertEqual(retry_after(CLIError("429 Retry-After: 12")), 12)
         self.assertIsNone(retry_after(CLIError("weekly limit reached")))
+        codex = retry_after(CLIError("You've hit your usage limit. ... or try again at 1:30 AM."))
+        self.assertTrue(0 < codex <= 24 * 3600 + 60)
+        self.assertEqual(classify_error(CLIError("You've hit your usage limit.")), ("quota", True))
+
+    def test_safety_refusal_falls_back_without_cooldown(self):
+        self.complete.side_effect = [CLIError("API Error: safeguards flagged this message"), ("fallback", {})]
+        text, _ = self.route()
+        self.assertEqual(text, "fallback")
+        self.assertEqual(self.models(), ["codex/gpt-6-luna", "codex/gpt-6-sol"])
+        self.assertTrue(State(self.db).available("luna", "codex-main"))
 
     def test_exact_profile_and_effort_and_lease_release(self):
         text, usage = self.route()

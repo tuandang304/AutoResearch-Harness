@@ -83,7 +83,8 @@ Selection uses only day_tune and synth_dark_tune (mean small_all AP).
 Colab through the Colab CLI (auto-provisioned; model-selected cpu/T4/L4/A100
 tiers; T4 is discouraged because its VMs have few CPU cores). Hard spend cap 185
 compute units of the ~198-unit balance (expected ~110). Per-script targets:
-stage 1 30 min, stage 2 60 min, stage 3 2 h, stage 4 90 min; hard limit 2.5 h.
+stage 1 ~40 min, stage 2 ~60 min, stage 3 ~2 h, stage 4 ~90 min (guidance, not pass/fail);
+hard limit 2.5 h.
 
 Search budget: 2 parallel workers. Stage 1 ends at its first working node (at most
 4 nodes). Stages 2, 3 and 4 have 4 new nodes each. Seeds 0-2 of the best stage-3
