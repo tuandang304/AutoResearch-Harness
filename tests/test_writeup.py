@@ -154,6 +154,43 @@ class IcbinbWriteupTests(WriteupTestCase):
                 )
                 self.assertNotRegex(prompt, r"(?<!\{)\{[a-z_]+\}(?!\})")
 
+    def test_plot_reflection_counts_only_png_figures(self):
+        from ai_scientist import perform_plotting as plotting
+
+        script = ("```python\nimport os\nos.makedirs('figures', exist_ok=True)\n"
+                  "open('figures/a.pdf', 'w').close()\nopen('figures/b.png', 'w').close()\n```")
+        with tempfile.TemporaryDirectory() as directory, \
+                patch.object(plotting, "load_idea_text", return_value="idea"), \
+                patch.object(plotting, "load_exp_summaries", return_value={}), \
+                patch.object(plotting, "filter_experiment_summaries", return_value={}), \
+                patch.object(plotting, "create_client", return_value=(Mock(), "m")), \
+                patch.object(plotting, "get_response_from_llm",
+                             side_effect=[(script, []), ("I am done", [])]) as request, \
+                redirect_stdout(io.StringIO()):
+            plotting.aggregate_plots(directory, model="m", n_reflections=1)
+        self.assertIn(".png", plotting.build_aggregator_prompt("s", "i"))
+        reflection = request.call_args_list[1].kwargs["prompt"]
+        self.assertIn("produced 1 .png figure(s). 1 other file(s)", reflection)
+
+    def test_seed_results_reach_plotting_and_writeup(self):
+        node = {"analysis": "a", "metric": "m", "code": "c", "plot_code": "p",
+                "exp_results_npy_files": ["s.npy"]}
+        summaries = {"RESEARCH_SUMMARY": {
+            "best node": node,
+            "best node with different seeds": [node, node],
+            "aggregated results of nodes with different seeds": node,
+        }}
+        plot = icbinb.filter_experiment_summaries(summaries, "plot_aggregation")
+        seeds = plot["RESEARCH_SUMMARY"]["best node with different seeds"]
+        self.assertEqual([s["exp_results_npy_files"] for s in seeds], [["s.npy"]] * 2)
+        self.assertNotIn("plot_code", seeds[0])
+        write = icbinb.filter_experiment_summaries(summaries, "writeup")["RESEARCH_SUMMARY"]
+        self.assertEqual(write["best node with different seeds"][0], {"analysis": "a", "metric": "m"})
+        self.assertIn("code", write["best node"])
+        self.assertIn("aggregated results of nodes with different seeds", write)
+        cite = icbinb.filter_experiment_summaries(summaries, "citation_gathering")
+        self.assertEqual(list(cite["RESEARCH_SUMMARY"]), ["best node"])
+
 
 class LatexToolTests(WriteupTestCase):
     def test_chktex_absence_warns_once(self):
@@ -219,6 +256,9 @@ class SemanticScholarTests(unittest.TestCase):
             "tool": lambda: tool.search_for_papers("query"),
             "function": lambda: semantic_scholar.search_for_papers("query"),
         }
+        # Without a key the function tries OpenAlex briefly, then Crossref.
+        tries = {"tool": semantic_scholar.S2_MAX_TRIES,
+                 "function": semantic_scholar.OPENALEX_MAX_TRIES + semantic_scholar.S2_MAX_TRIES}
         for name, search in searches.items():
             with self.subTest(search=name), \
                     patch.object(semantic_scholar.requests, "get",
@@ -226,9 +266,66 @@ class SemanticScholarTests(unittest.TestCase):
                     patch("time.sleep"), patch("warnings.warn"), redirect_stdout(io.StringIO()):
                 with self.assertRaises(requests.exceptions.HTTPError):
                     search()
-                self.assertEqual(get.call_count, semantic_scholar.S2_MAX_TRIES)
+                self.assertEqual(get.call_count, tries[name])
                 for call in get.call_args_list:
                     self.assertEqual(call.kwargs["timeout"], semantic_scholar.S2_REQUEST_TIMEOUT)
+
+
+class OpenAlexCitationTests(unittest.TestCase):
+    WORK = {
+        "display_name": "You Only Look Around: Low-light Object Detection",
+        "publication_year": 2024, "cited_by_count": 7, "doi": "https://doi.org/10.1/x",
+        "authorships": [{"author": {"display_name": "Mingbo Hong"}},
+                        {"author": {"display_name": "Shen Cheng"}}],
+        "primary_location": {"source": {"display_name": "NeurIPS", "type": "conference"}},
+        "abstract_inverted_index": {"Low": [0], "light": [1]},
+    }
+
+    def test_openalex_work_becomes_a_citable_paper(self):
+        from ai_scientist.tools.semantic_scholar import _openalex_paper
+
+        paper = _openalex_paper(self.WORK)
+        self.assertEqual((paper["year"], paper["venue"], paper["abstract"]), (2024, "NeurIPS", "Low light"))
+        bib = paper["citationStyles"]["bibtex"]
+        self.assertTrue(bib.startswith("@inproceedings{hong2024only,"))
+        self.assertIn("author = {Mingbo Hong and Shen Cheng}", bib)
+        self.assertIn("doi = {10.1/x}", bib)
+
+    def test_without_s2_key_openalex_is_used(self):
+        from ai_scientist.tools import semantic_scholar
+
+        response = unittest.mock.Mock(status_code=200)
+        response.json.return_value = {"results": [self.WORK]}
+        with unittest.mock.patch.dict(os.environ, {}, clear=False), \
+                unittest.mock.patch.object(semantic_scholar.requests, "get", return_value=response) as get, \
+                unittest.mock.patch.object(semantic_scholar.time, "sleep"):
+            os.environ.pop("S2_API_KEY", None)
+            papers = semantic_scholar.search_for_papers("low light", 3)
+        self.assertEqual(get.call_args.args[0], "https://api.openalex.org/works")
+        self.assertEqual(papers[0]["title"], self.WORK["display_name"])
+
+    def test_unavailable_openalex_falls_back_to_crossref(self):
+        from ai_scientist.tools import semantic_scholar
+
+        down = unittest.mock.Mock(status_code=503)
+        down.raise_for_status.side_effect = requests.exceptions.HTTPError("503")
+        up = unittest.mock.Mock(status_code=200)
+        up.json.return_value = {"message": {"items": [{
+            "title": ["2PCNet: Two-Phase Consistency Training"], "type": "proceedings-article",
+            "author": [{"given": "Mikhail", "family": "Kennerley"}], "DOI": "10.1109/x",
+            "container-title": ["CVPR"], "issued": {"date-parts": [[2023, 6]]},
+            "abstract": "<jats:p>Day to night.</jats:p>", "is-referenced-by-count": 3,
+        }]}}
+        with unittest.mock.patch.dict(os.environ, {}, clear=False), \
+                unittest.mock.patch.object(semantic_scholar.requests, "get",
+                                           side_effect=[down, down, up]) as get, \
+                unittest.mock.patch("time.sleep"), redirect_stdout(io.StringIO()):
+            os.environ.pop("S2_API_KEY", None)
+            papers = semantic_scholar.search_for_papers("2PCNet", 3)
+        self.assertEqual(get.call_args.args[0], "https://api.crossref.org/works")
+        self.assertEqual((papers[0]["year"], papers[0]["abstract"]), (2023, "Day to night."))
+        self.assertTrue(papers[0]["citationStyles"]["bibtex"].startswith(
+            "@inproceedings{kennerley20232pcnet,"))
 
 
 if __name__ == "__main__":

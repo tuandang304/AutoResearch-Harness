@@ -329,7 +329,11 @@ def overall_summarize(journals, cfg=None):
         stage_name, journal = stage_tuple
         annotate_history(journal, cfg=cfg)
         if idx in [1, 2]:
-            best_node = journal.get_best_node(cfg=cfg)
+            # The node that was seed-evaluated; a fresh best-node choice can pick a
+            # sibling with equal metrics and silently drop the seed results.
+            seeded = [n for n in journal.nodes
+                      if not n.is_seed_node and any(c.is_seed_node for c in n.children)]
+            best_node = seeded[-1] if seeded else journal.get_best_node(cfg=cfg)
             if best_node is None:
                 return {"best node": None, "best node with different seeds": []}
             # get multi-seed results and aggregater node

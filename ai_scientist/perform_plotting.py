@@ -64,6 +64,7 @@ Our goal is to produce final, publishable figures.
 IMPORTANT:
 - The aggregator script must load existing .npy experiment data from the "exp_results_npy_files" fields (ONLY using full and exact file paths in the summary JSONs) for thorough plotting.
 - It should call os.makedirs("figures", exist_ok=True) before saving any plots.
+- Save every figure as a .png file (for example dpi=300); the paper writer uses only .png files in 'figures/'.
 - Aim for a balance of empirical results, ablations, and diverse, informative visuals in 'figures/' that comprehensively showcase the finalized research outcomes.
 - If you need .npy paths from the summary, only copy those paths directly (rather than copying and parsing the entire summary).
 
@@ -193,18 +194,22 @@ def aggregate_plots(
     # Multiple reflection loops
     for i in range(n_reflections):
         # Check number of figures
-        figure_count = 0
+        files = []
         if os.path.exists(figures_dir):
-            figure_count = len(
-                [
-                    f
-                    for f in os.listdir(figures_dir)
-                    if os.path.isfile(os.path.join(figures_dir, f))
-                ]
-            )
+            files = [
+                f
+                for f in os.listdir(figures_dir)
+                if os.path.isfile(os.path.join(figures_dir, f))
+            ]
+        figure_count = sum(f.lower().endswith(".png") for f in files)
+        ignored = len(files) - figure_count
         print(f"[{i + 1} / {n_reflections}]: Number of figures: {figure_count}")
+        ignored_note = (
+            f" {ignored} other file(s) in figures/ are not .png and will be ignored by the paper writer."
+            if ignored else ""
+        )
         # Reflection prompt with reminder for common checks and early exit
-        reflection_prompt = f"""We have run your aggregator script and it produced {figure_count} figure(s). The script's output is:
+        reflection_prompt = f"""We have run your aggregator script and it produced {figure_count} .png figure(s).{ignored_note} The script's output is:
 ```
 {aggregator_out}
 ```

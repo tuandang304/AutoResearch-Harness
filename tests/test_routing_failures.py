@@ -181,5 +181,42 @@ class RoutingFailureTests(unittest.TestCase):
                     query.assert_called_once()
 
 
+    def test_seed_rerun_keeps_results_the_reviewer_flags(self):
+        """A seed rerun is dropped only for a crash, not for a disliked result."""
+        for exc_type, expected_buggy in ((None, False), ("RuntimeError", True)):
+            with self.subTest(exc_type=exc_type), tempfile.TemporaryDirectory() as root:
+                self.cfg.workspace_dir = str(Path(root) / "run")
+                parent = Node(code="pass", plan="test")
+                parent.parse_metrics_code, parent.plot_code = "pass", "pass"
+                worker = Mock()
+                worker._generate_seed_node.side_effect = lambda p: Node(code=p.code, plan="seed")
+
+                def review(node, exec_result, workspace):
+                    node.exc_type = exc_type
+                    node.analysis = "The day_test guard failed."
+                    node.is_buggy = True
+
+                worker.parse_exec_result.side_effect = review
+                interpreter = Mock()
+
+                def execute(code, reset):
+                    working = next(Path(root).glob("run/process_*/working"))
+                    (working / "experiment_data.npy").write_bytes(b"data")
+                    return ExecutionResult(["ok"], 1.0, None)
+
+                interpreter.run.side_effect = execute
+                parsed = {"valid_metrics_received": True, "metric_names": [{
+                    "metric_name": "AP", "lower_is_better": False, "description": "test",
+                    "data": [{"dataset_name": "d", "final_value": 0.1, "best_value": 0.1}]}]}
+                with patch.dict(os.environ), \
+                        patch("ai_scientist.treesearch.parallel_agent.MinimalAgent", return_value=worker), \
+                        patch("ai_scientist.treesearch.remote_interpreter.make_interpreter", return_value=interpreter), \
+                        patch("ai_scientist.treesearch.parallel_agent.query", return_value=parsed):
+                    result = ParallelAgent._process_node_wrapper(
+                        parent.to_dict(), "test", self.cfg, seed_eval=True)
+                self.assertEqual(result["is_buggy"], expected_buggy)
+                self.assertIn("The day_test guard failed.", result["analysis"])
+
+
 if __name__ == "__main__":
     unittest.main()

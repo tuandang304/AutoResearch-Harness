@@ -703,18 +703,32 @@ def filter_experiment_summaries(exp_summaries, step_name):
     else:
         raise ValueError(f"Invalid step name: {step_name}")
 
+    # Seed reruns share the best node's code, so only their results are kept.
+    seed_keys_to_keep = node_keys_to_keep - {"code", "plot_code"}
+
+    def keep(node, keys):
+        return {k: v for k, v in (node or {}).items() if k in keys}
+
     filtered_summaries = {}
     for stage_name in exp_summaries.keys():
         if stage_name in {"BASELINE_SUMMARY", "RESEARCH_SUMMARY"}:
             filtered_summaries[stage_name] = {}
             for key in exp_summaries[stage_name].keys():
                 if key in {"best node"}:
-                    filtered_summaries[stage_name][key] = {}
-                    for node_key in exp_summaries[stage_name][key].keys():
-                        if node_key in node_keys_to_keep:
-                            filtered_summaries[stage_name][key][node_key] = (
-                                exp_summaries[stage_name][key][node_key]
-                            )
+                    filtered_summaries[stage_name][key] = keep(
+                        exp_summaries[stage_name][key], node_keys_to_keep
+                    )
+                elif step_name == "citation_gathering":
+                    continue
+                elif key == "best node with different seeds":
+                    filtered_summaries[stage_name][key] = [
+                        keep(node, seed_keys_to_keep)
+                        for node in exp_summaries[stage_name][key]
+                    ]
+                elif key == "aggregated results of nodes with different seeds":
+                    filtered_summaries[stage_name][key] = keep(
+                        exp_summaries[stage_name][key], seed_keys_to_keep
+                    )
         elif stage_name == "ABLATION_SUMMARY" and step_name == "plot_aggregation":
             filtered_summaries[stage_name] = {}
             for ablation_summary in exp_summaries[stage_name]:

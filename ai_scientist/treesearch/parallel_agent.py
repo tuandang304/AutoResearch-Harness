@@ -860,6 +860,7 @@ class MinimalAgent:
                 "Set is_bug only for execution, implementation, invalid measurements, or explicit task-constraint failures. "
                 "Poor precision/recall, zero recall, many false positives, or a weak undertrained model alone are not bugs. "
                 "Respect the requested training budget; do not demand longer training to accept a bounded smoke test. "
+                "A hypothesis, guard or success criterion that the measured results fail is a study outcome, not a bug. "
             ),
             "Research idea": self.task_desc,
             "Implementation": wrap_code(node.code),
@@ -1737,6 +1738,15 @@ class ParallelAgent:
             worker_agent.parse_exec_result(
                 node=child_node, exec_result=exec_result, workspace=working_dir
             )
+            if seed_eval and child_node.is_buggy and child_node.exc_type is None:
+                # A seed rerun of accepted code fails only by crashing or by the data
+                # and metric checks below; a result the reviewer dislikes (e.g. a failed
+                # guard) must stay in the seed results rather than be dropped.
+                child_node.is_buggy = False
+                child_node.analysis = (
+                    "Reviewer bug flag not applied to a seed rerun of accepted code. "
+                    + (child_node.analysis or "")
+                )
 
             # Add check for saved data files
             data_files = [f for f in os.listdir(working_dir) if f.endswith(".npy")]

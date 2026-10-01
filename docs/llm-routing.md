@@ -31,11 +31,12 @@ performance at the selected effort or with this completion-only CLI interface.
 | Profile | Exact ID | Effort | Initial assignment |
 |---|---|---|---|
 | opus | claude-opus-5-5 | medium | Orchestration, manuscript decisions and final review |
+| astra_orchestrator | gpt-6-astra | medium | Orchestration fallback after Opus |
+| argon | gemini-4-argon | medium | Last orchestration fallback; unreleased, unverified |
 | opus_worker | claude-opus-5-5 | low | Last-resort bounded worker |
 | sonnet | claude-sonnet-5-5 | low | Scoped fixes and iterative editing; shared Claude quota |
 | astra | gpt-6-astra | low | Integration and difficult debugging |
-| sol | gpt-6-sol | low | Routine implementation and writing |
-| luna | gpt-6-luna | low | Extraction, small edits, summaries |
+| sol | gpt-6.1-sol | low | Routine implementation and writing |
 | flash | gemini-3.8-flash | high | Numerical/visual analysis and multi-step work |
 
 Research checked 2026-09-29:
@@ -61,11 +62,18 @@ which credentials and limits are independent.
 
 ## How assignment works
 
-For `code` and `plotting`, a separate pinned Opus call selects one allowed worker
+For `code` and `plotting`, a separate orchestrator call selects one allowed worker
 using the task and profile strengths. The selection must pass JSON/allowlist
 validation. It does not execute tools or alter the experiment plan. Images are
 not sent to the selector; the worker receives the full original image content.
 Long task context is truncated for selection only, not for execution.
+
+The orchestrator role is an ordered `fallback`: every call starts with Opus, moves
+to Astra (medium) only when Opus is in cooldown or its call fails, and to Argon
+after Astra. A busy but available profile is waited for rather than skipped, and
+there is no stickiness, so Opus is used again as soon as its cooldown ends.
+`writeup` and `review` stay pinned to Opus. Each call records the profile that
+answered in `routing.jsonl`.
 
 Routine feedback, summaries, citation assistance and vision review use configured
 priority pools without paying for another selection call. Switching stays within
@@ -81,7 +89,8 @@ therefore cannot be directly transferred to this harness.
 
 ## Failure handling and limits
 
-- Pinned roles never silently substitute a model.
+- Pinned roles never silently substitute a model. The orchestrator's ordered
+  fallback is explicit policy, not substitution.
 - Temporary rate limits honor an exposed `Retry-After`; otherwise use the configured
   cooldown. Explicit account-wide limits block the group; model-local/ambiguous
   rate limits block only the affected profile.
@@ -163,6 +172,28 @@ not expose serving-model metadata in these probes.
 
 A separate routed call passed: Opus selected Luna for a bounded extraction,
 the worker returned the expected JSON, and both models were attributed separately.
+
+### Profile update on 2026-10-01
+
+The luna profile (`gpt-6-luna`) was removed. Its feedback, summary, writing and
+code slots now start with Sol. The orchestrator gained two fallbacks: `astra_orchestrator`
+(`gpt-6-astra`, medium, with orchestrator instructions) and `argon` (`gemini-4-argon`
+via Antigravity, medium). Argon is unreleased: no live probe has accepted it, no
+strengths are documented, and it declares only text/JSON until a vision probe
+passes. If it is reached before release, its call fails as a configuration or
+unknown error and the router raises `RouterUnavailable`. Its effort and capabilities
+are placeholders to revisit after release. Verify it with
+`scripts/verify_llm_profiles.py --live --model antigravity/gemini-4-argon` once it is available.
+Astra's fallback shares `codex-main` with the GPT workers, so
+`reserve_orchestrator_capacity` protects only the Opus account.
+
+### Sol profile update on 2026-09-30
+
+The sol profile now uses `gpt-6.1-sol` (low effort). Codex CLI 0.158.0 rejected
+this ID for ChatGPT-account logins; Codex CLI 0.159.2 accepts it. The text, JSON and
+image checks passed (`.state/model-verification-gpt-6.1-sol.json`). As with the other
+Codex models, the probes show only that the request was accepted, not which model
+served it. Run snapshots made before this date still record `gpt-6-sol`.
 This is interface verification, not a full research run or a quality benchmark.
 Sanitized local evidence is in `.state/model-verification.json`; run-specific
 routing evidence is under `.state/routing-check-*/`. These artifacts are ignored

@@ -80,6 +80,20 @@ scripts as a real `__main__` module, so process pools can pickle their functions
 A Colab status call that fails (for example a DNS error) no longer provisions a
 replacement VM; the job waits and reconnects to the existing one.
 
+Seed results now reach the paper. The research summary takes the node that was
+seed-evaluated, not a fresh best-node choice that can pick a sibling. Plotting and
+writing receive the per-seed results and the seed aggregate, without repeating the
+code. A seed rerun of accepted code is marked buggy only when it crashes or its data
+or metrics fail to parse, not when the reviewer dislikes the result (for example a
+failed pre-registered guard); the review prompt says such failures are outcomes.
+The plot aggregator must save PNG figures, the only format the paper writer uses. Without a Semantic Scholar key (`S2_API_KEY`), citations come from OpenAlex,
+because unauthenticated Semantic Scholar searches are mostly rate limited;
+`OPENALEX_MAILTO` optionally adds a contact address to OpenAlex requests.
+
+The orchestrator role may use an ordered `fallback` selection (Opus, Astra, Argon in
+`configs/llm.yaml`). It is not sticky, does not skip a busy profile, and cannot use
+`orchestrator` selection itself.
+
 ## Changes in this development update
 
 See [model routing](llm-routing.md) for profile selection, live verification,

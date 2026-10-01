@@ -41,24 +41,25 @@ profiles:
     instructions: >-
       Resolve cross-component constraints and difficult bugs within the supplied scope.
       Give a concise implementation and explicit verification criteria. Do not expand the study.
+  astra_orchestrator:
+    provider: codex
+    model: gpt-6-astra
+    effort: medium
+    quota_group: codex-main
+    capabilities: [text, json, vision]
+    strengths: Orchestration fallback when Opus is unavailable; shares Codex quota with GPT workers.
+    instructions: >-
+      Make evidence-based research decisions. State acceptance criteria and unresolved
+      risks. Never treat a successful process or generated paper as scientific validation.
+      Return the requested deliverable, not a promise to continue. Do not invent results.
   sol:
     provider: codex
-    model: gpt-6-sol
+    model: gpt-6.1-sol
     effort: low
     quota_group: codex-main
     capabilities: [text, json, vision]
     strengths: General writing, coding and judgment; use bounded tasks at low effort.
     instructions: Implement the supplied plan with reproducible settings and exact output formatting.
-  luna:
-    provider: codex
-    model: gpt-6-luna
-    effort: low
-    quota_group: codex-main
-    capabilities: [text, json, vision]
-    strengths: Scoped edits, extraction, triage and frequent routine tasks.
-    instructions: >-
-      Extract only supported values and preserve units, split names and seeds.
-      Use null or the requested missing-value convention rather than guessing.
   flash:
     provider: antigravity
     model: gemini-3.8-flash
@@ -70,20 +71,33 @@ profiles:
       Check numerical consistency and alternative explanations. For images distinguish
       visible evidence from inference; do not invent values that are not legible.
       Return the requested result concisely without unrelated tool use.
+  argon:
+    # Unreleased and unverified: no live probe has accepted this ID yet.
+    provider: antigravity
+    model: gemini-4-argon
+    effort: medium
+    quota_group: google-main
+    capabilities: [text, json]
+    strengths: Last orchestration fallback; unreleased, so no documented strengths or verified access.
+    instructions: >-
+      Make evidence-based research decisions. State acceptance criteria and unresolved
+      risks. Never treat a successful process or generated paper as scientific validation.
+      Return the requested deliverable, not a promise to continue. Do not invent results.
 
 # These assignments are hypotheses informed by docs, not measured model rankings.
-# Only code/plot generation pays for a separate Opus worker-selection call.
+# Only code/plot generation pays for a separate orchestrator worker-selection call.
+# The orchestrator falls back in order only when a profile is in cooldown or fails.
 roles:
-  orchestrator: {candidates: [opus], selection: pinned}
+  orchestrator: {candidates: [opus, astra_orchestrator, argon], selection: fallback}
   writeup: {candidates: [opus], selection: pinned}
   review: {candidates: [opus], selection: pinned}
-  code: {candidates: [sol, astra, flash, luna, sonnet, opus_worker], selection: orchestrator}
+  code: {candidates: [sol, astra, flash, sonnet, opus_worker], selection: orchestrator}
   plotting: {candidates: [sol, flash, astra, sonnet, opus_worker], selection: orchestrator}
-  feedback: {candidates: [luna, sol, flash, astra, sonnet, opus_worker], selection: sticky_priority}
+  feedback: {candidates: [sol, flash, astra, sonnet, opus_worker], selection: sticky_priority}
   vision: {candidates: [flash, sol, astra, sonnet, opus_worker], selection: sticky_priority}
-  summary: {candidates: [luna, sol, flash, astra, sonnet, opus_worker], selection: sticky_priority}
+  summary: {candidates: [sol, flash, astra, sonnet, opus_worker], selection: sticky_priority}
   citation: {candidates: [sol, flash, astra, sonnet, opus_worker], selection: sticky_priority}
-  writing: {candidates: [sol, luna, flash, astra, sonnet, opus_worker], selection: sticky_priority}
+  writing: {candidates: [sol, flash, astra, sonnet, opus_worker], selection: sticky_priority}
 
 routing:
   max_total_attempts_per_call: 6
@@ -95,12 +109,12 @@ routing:
   reserve_orchestrator_capacity: true
 
 orchestrator_instructions: >-
-  Assign routine extraction and small, fully specified changes to Luna; ordinary
-  implementation and writing to Sol; broad-context integration and difficult debugging
+  Assign ordinary implementation, writing, extraction and small, fully specified
+  changes to Sol; broad-context integration and difficult debugging
   to Astra; multi-step numerical or visual analysis to Flash; scoped bug fixes and
   iterative document/code refinement to Sonnet. Treat these as starting
   hypotheses, not guarantees, especially at low effort. Keep Opus workers as a last
-  resort because they share your quota. Sonnet shares that group too, so prefer
+  resort because they share the Opus orchestrator's quota. Sonnet shares that group too, so prefer
   independent providers while reserving orchestration capacity. Match the task,
   not brand reputation. Decompose
   complex work before assigning it to a low-effort worker. Preserve exact schemas,
