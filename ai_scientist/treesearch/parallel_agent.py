@@ -164,6 +164,28 @@ def _finish_smoke_node(child_node, exec_result, working_dir, workspace, cfg):
     return child_node.to_dict()
 
 
+PARENT_RESULTS_DIR = "parent_results"
+
+
+def _copy_baseline_results(results_dir, workspace):
+    """Copy a baseline node's saved .npy results into <workspace>/parent_results, so
+    an ablation can compare with it without re-running it. Returns the file names."""
+    if not results_dir:
+        return []
+    source = Path(results_dir)
+    if not source.is_absolute():
+        source = Path.cwd() / source
+    files = sorted(source.glob("*.npy")) if source.is_dir() else []
+    if not files:
+        logger.warning(f"No saved baseline results in {source}")
+        return []
+    target = Path(workspace) / PARENT_RESULTS_DIR
+    target.mkdir(exist_ok=True)
+    for path in files:
+        shutil.copy2(path, target / path.name)
+    return [path.name for path in files]
+
+
 def _safe_pickle_test(obj, name="object"):
     """Test if an object can be pickled"""
     try:
@@ -763,7 +785,8 @@ class MinimalAgent:
             hyperparam_name=hyperparam_idea.name,
         )
 
-    def _generate_ablation_node(self, parent_node: Node, ablation_idea: AblationIdea):
+    def _generate_ablation_node(self, parent_node: Node, ablation_idea: AblationIdea,
+                                parent_results=()):
         prompt: Any = {
             "Introduction": (
                 "You are an experienced AI researcher. You are provided with a previously developed "
@@ -810,6 +833,14 @@ class MinimalAgent:
                 "Make sure to use a filename 'experiment_data.npy' to save the data. Do not use any other filename.",
             ]
         }
+        if parent_results:
+            prompt["Instructions"]["Baseline results"] = (
+                f"The base code's saved outputs are in ./{PARENT_RESULTS_DIR}/ next to the script "
+                f"(files: {', '.join(parent_results)}). Load them with np.load(..., allow_pickle=True) "
+                "to compare the ablation with the baseline instead of re-running the baseline. "
+                "They are read-only inputs: never write to that folder, and save your own results "
+                "only in ./working."
+            )
         prompt["Instructions"] |= self._prompt_ablation_resp_fmt
         prompt["Instructions"] |= self._prompt_compute
         plan, code = self.plan_and_code_query(prompt)
@@ -1446,7 +1477,10 @@ class ParallelAgent:
         # Submit parallel jobs for different seeds
         seed_nodes = []
         futures = []
-        for seed in range(self.cfg.agent.multi_seed_eval.num_seeds):
+        # With reuse_evaluated_node the evaluated node (run with the script's default
+        # seed 0) counts as seed 0, so only seeds 1..num_seeds-1 are run again.
+        reuse = bool(self.cfg.agent.multi_seed_eval.get("reuse_evaluated_node", False))
+        for seed in range(1 if reuse else 0, self.cfg.agent.multi_seed_eval.num_seeds):
             # ProcessPoolExecutor serializes submissions asynchronously: each seed
             # must own its input instead of sharing a dictionary modified below.
             node_data = node.to_dict()
@@ -1486,12 +1520,12 @@ class ParallelAgent:
                     memory_summary,
                     self.evaluation_metrics,
                     self.stage_name,
-                    new_ablation_idea,
-                    new_hyperparam_idea,
-                    best_stage1_plot_code,
-                    best_stage2_plot_code,
-                    best_stage3_plot_code,
-                    seed_eval,
+                    new_ablation_idea=new_ablation_idea,
+                    new_hyperparam_idea=new_hyperparam_idea,
+                    best_stage3_plot_code=best_stage3_plot_code,
+                    best_stage2_plot_code=best_stage2_plot_code,
+                    best_stage1_plot_code=best_stage1_plot_code,
+                    seed_eval=seed_eval,
                 )
             )
 
@@ -1515,7 +1549,7 @@ class ParallelAgent:
                 logger.error(f"Error in multi-seed evaluation: {str(e)}")
                 raise
 
-        return seed_nodes
+        return ([node] if reuse else []) + seed_nodes
 
     def _run_plot_aggregation(self, node: Node, seed_nodes: List[Node]) -> Node:
         """Generate an aggregation node for seed evaluation results"""
@@ -1612,6 +1646,7 @@ class ParallelAgent:
         best_stage2_plot_code=None,
         best_stage1_plot_code=None,
         seed_eval=False,
+        baseline_results_dir=None,
     ):
         """Wrapper function that creates a fresh environment for each process"""
         from .remote_interpreter import make_interpreter
@@ -1633,6 +1668,7 @@ class ParallelAgent:
         os.makedirs(working_dir, exist_ok=True)
         for support_file in getattr(cfg.exec, "support_files", None) or []:
             shutil.copy2(support_file, workspace)
+        baseline_results = _copy_baseline_results(baseline_results_dir, workspace)
 
         if gpu_id is not None:
             os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
@@ -1706,7 +1742,7 @@ class ParallelAgent:
                         new_ablation_idea is not None and new_hyperparam_idea is None
                     ):  # stage 4
                         child_node = worker_agent._generate_ablation_node(
-                            parent_node, new_ablation_idea
+                            parent_node, new_ablation_idea, baseline_results,
                         )
                         child_node.parent = parent_node
                         logger.info(f"Processing ablation: {child_node.ablation_name}")
@@ -2370,6 +2406,13 @@ class ParallelAgent:
             best_stage3_plot_code = (
                 self.best_stage3_node.plot_code if self.best_stage3_node else None
             )
+            # Stage-4 nodes (ablations and their debug children) compare with the
+            # stage-3 baseline, whose saved results are copied into their workspace.
+            baseline_results_dir = (
+                self.best_stage3_node.exp_results_dir
+                if self.stage_name and self.stage_name.startswith("4_") and self.best_stage3_node
+                else None
+            )
             seed_eval = False
             futures.append(
                 self.executor.submit(
@@ -2381,12 +2424,13 @@ class ParallelAgent:
                     memory_summary,
                     self.evaluation_metrics,
                     self.stage_name,
-                    new_ablation_idea,
-                    new_hyperparam_idea,
-                    best_stage1_plot_code,
-                    best_stage2_plot_code,
-                    best_stage3_plot_code,
-                    seed_eval,
+                    new_ablation_idea=new_ablation_idea,
+                    new_hyperparam_idea=new_hyperparam_idea,
+                    best_stage3_plot_code=best_stage3_plot_code,
+                    best_stage2_plot_code=best_stage2_plot_code,
+                    best_stage1_plot_code=best_stage1_plot_code,
+                    seed_eval=seed_eval,
+                    baseline_results_dir=baseline_results_dir,
                 )
             )
 

@@ -218,5 +218,73 @@ class RoutingFailureTests(unittest.TestCase):
                 self.assertIn("The day_test guard failed.", result["analysis"])
 
 
+    def test_stage4_nodes_receive_stage3_baseline_results(self):
+        from ai_scientist.treesearch import parallel_agent as module
+        with tempfile.TemporaryDirectory() as root:
+            results, workspace = Path(root) / "results", Path(root) / "ws"
+            results.mkdir(); workspace.mkdir()
+            (results / "experiment_data.npy").write_bytes(b"x")
+            (results / "states_A.npy").write_bytes(b"y")
+            (results / "plot.png").write_bytes(b"z")
+            names = module._copy_baseline_results(str(results), workspace)
+            self.assertEqual(names, ["experiment_data.npy", "states_A.npy"])
+            self.assertEqual(sorted(p.name for p in (workspace / "parent_results").iterdir()), names)
+            self.assertEqual(module._copy_baseline_results(None, workspace), [])
+            self.assertEqual(module._copy_baseline_results(str(Path(root) / "missing"), workspace), [])
+        cfg = OmegaConf.merge(self.cfg, {"exec": {"timeout": 3600, "backend": "local"}})
+        worker = MinimalAgent("test", cfg)
+        idea = SimpleNamespace(name="no cast", description="drop the colour cast")
+        with patch.object(MinimalAgent, "plan_and_code_query", return_value=("plan", "code")) as query:
+            worker._generate_ablation_node(Node(code="pass", plan="base"), idea, ["experiment_data.npy"])
+        instructions = query.call_args.args[0]["Instructions"]
+        self.assertIn("./parent_results/", instructions["Baseline results"])
+
+    def test_step_passes_each_stage_plot_code_to_its_own_parameter(self):
+        agent = ParallelAgent.__new__(ParallelAgent)
+        agent.cfg = self.cfg
+        agent.journal = Journal()
+        agent.journal.generate_summary = Mock(return_value="summary")
+        parent = Node(code="3", plan="p")
+        parent.is_buggy = False
+        agent._select_parallel_nodes = Mock(return_value=[parent])
+        agent.gpu_manager = None
+        agent.task_desc, agent.evaluation_metrics, agent.timeout = "test", "AP", 10
+        agent.stage_name = "4_ablation"
+        agent._ablation_state = {"completed_ablations": set()}
+        agent._generate_ablation_idea = Mock(return_value=SimpleNamespace(name="x", description="y"))
+        agent.best_stage1_node, agent.best_stage2_node = Node(code="1", plan="p"), Node(code="2", plan="p")
+        agent.best_stage3_node = Node(code="3", plan="p")
+        for stage, node in zip("123", (agent.best_stage1_node, agent.best_stage2_node, agent.best_stage3_node)):
+            node.plot_code = f"plot{stage}"
+        agent.best_stage3_node.exp_results_dir = "logs/0-run/experiment_results/x"
+        future = Future()
+        future.set_exception(self.failure)
+        agent.executor = Mock()
+        agent.executor.submit.return_value = future
+        with self.assertRaises(RouterUnavailable):
+            agent.step(Mock())
+        kwargs = agent.executor.submit.call_args.kwargs
+        self.assertEqual([kwargs[f"best_stage{i}_plot_code"] for i in "123"], ["plot1", "plot2", "plot3"])
+        self.assertEqual(kwargs["baseline_results_dir"], "logs/0-run/experiment_results/x")
+
+
+    def test_reused_evaluated_node_skips_rerunning_seed_zero(self):
+        agent = ParallelAgent.__new__(ParallelAgent)
+        agent.cfg = OmegaConf.merge(self.cfg, {"agent": {"multi_seed_eval": {
+            "num_seeds": 3, "reuse_evaluated_node": True}}})
+        agent.journal, agent.gpu_manager, agent.timeout = Journal(), None, 10
+        agent.task_desc, agent.evaluation_metrics, agent.stage_name = "test", "AP", "3_test"
+        future = Future()
+        future.set_exception(self.failure)
+        agent.executor = Mock()
+        agent.executor.submit.return_value = future
+        with self.assertRaises(RouterUnavailable):
+            agent._run_multi_seed_evaluation(Node(code="pass", plan="test"))
+        codes = [call.args[1]["code"] for call in agent.executor.submit.call_args_list]
+        self.assertEqual(len(codes), 2)
+        self.assertIn("AUTORESEARCH_SEED'] = '1'", codes[0])
+        self.assertIn("AUTORESEARCH_SEED'] = '2'", codes[1])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -341,6 +341,9 @@ def overall_summarize(journals, cfg=None):
             multi_seed_nodes = [
                 n for n in child_nodes if n.is_seed_node and not n.is_seed_agg_node
             ]
+            if multi_seed_nodes and cfg is not None and cfg.agent.multi_seed_eval.get(
+                    "reuse_evaluated_node", False):
+                multi_seed_nodes = [best_node] + multi_seed_nodes  # it is seed 0
             agg_node = None
             for n in child_nodes:
                 if n.is_seed_node and n.is_seed_agg_node:

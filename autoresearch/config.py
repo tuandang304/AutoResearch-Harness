@@ -39,6 +39,8 @@ def validate_config(config):
         isinstance(s, bool) or s not in (1, 2, 3, 4) for s in seed_stages
     ):
         raise ValueError("agent.multi_seed_eval.stages must be a list of stage numbers 1-4")
+    if not isinstance(agent["multi_seed_eval"].get("reuse_evaluated_node", False), bool):
+        raise ValueError("agent.multi_seed_eval.reuse_evaluated_node must be true or false")
     support = execution.get("support_files") or []
     if not isinstance(support, list) or not all(isinstance(p, str) for p in support):
         raise ValueError("exec.support_files must be a list of file paths")

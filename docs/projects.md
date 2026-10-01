@@ -33,6 +33,12 @@ Study-specific controls:
   Each file must be under 1 MB; code prompts name them.
 - `agent.multi_seed_eval.stages` (default `[1, 2, 3, 4]`) limits seed re-runs of
   the best node to the listed main stages.
+- `agent.multi_seed_eval.reuse_evaluated_node: true` counts the evaluated node as
+  seed 0 and reruns only seeds 1 to num_seeds-1. Use it only when the script's default
+  seed is 0 (for example `AUTORESEARCH_SEED` defaulting to `'0'`).
+- Stage-4 nodes, including debug children of ablations, get a copy of the best
+  stage-3 node's saved `.npy` files in `parent_results/` next to the script, so an
+  ablation can compare with its baseline without retraining it.
 - Sub-stages share their main stage's `stageN_max_iters` node budget.
 
 The existing ideation tool accepts --workshop-file projects/my-study/brief.md.

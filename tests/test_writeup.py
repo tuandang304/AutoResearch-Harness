@@ -240,6 +240,26 @@ class LatexToolTests(WriteupTestCase):
             self.assertTrue(pdf.exists())
 
 
+class ReviewPaperLoadingTests(unittest.TestCase):
+    def test_review_reads_plain_pdf_text_before_markdown_conversion(self):
+        import pymupdf
+        from ai_scientist import perform_llm_review as review
+        sentence = "Applied per seed, B loses 0.0082, 0.0164 and 0.0110 small-object AP. " * 3
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "paper.pdf")
+            doc = pymupdf.open()
+            for _ in range(2):
+                doc.new_page().insert_textbox(pymupdf.Rect(50, 50, 550, 800), sentence, fontsize=10)
+            doc.save(path)
+            garbled = "B loses 0 0.0082, 0, 0 0.0164 " * 20
+            with patch.object(review.pymupdf4llm, "to_markdown", return_value=garbled):
+                text = review.load_paper(path)
+                first_page = review.load_paper(path, num_pages=1)
+        self.assertIn("B loses 0.0082, 0.0164 and 0.0110", text)
+        self.assertNotIn("0 0.0082", text)
+        self.assertLess(len(first_page), len(text))
+
+
 class SemanticScholarTests(unittest.TestCase):
     def failing_response(self):
         response = Mock(status_code=429, text="rate limited")

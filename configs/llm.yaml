@@ -91,13 +91,13 @@ roles:
   orchestrator: {candidates: [opus, astra_orchestrator, argon], selection: fallback}
   writeup: {candidates: [opus], selection: pinned}
   review: {candidates: [opus], selection: pinned}
-  code: {candidates: [sol, astra, flash, sonnet, opus_worker], selection: orchestrator}
-  plotting: {candidates: [sol, flash, astra, sonnet, opus_worker], selection: orchestrator}
-  feedback: {candidates: [sol, flash, astra, sonnet, opus_worker], selection: sticky_priority}
-  vision: {candidates: [flash, sol, astra, sonnet, opus_worker], selection: sticky_priority}
-  summary: {candidates: [sol, flash, astra, sonnet, opus_worker], selection: sticky_priority}
-  citation: {candidates: [sol, flash, astra, sonnet, opus_worker], selection: sticky_priority}
-  writing: {candidates: [sol, flash, astra, sonnet, opus_worker], selection: sticky_priority}
+  code: {candidates: [sonnet, sol, astra, flash, opus_worker], selection: orchestrator}
+  plotting: {candidates: [sonnet, sol, flash, astra, opus_worker], selection: orchestrator}
+  feedback: {candidates: [sonnet, sol, flash, astra, opus_worker], selection: sticky_priority}
+  vision: {candidates: [sonnet, flash, sol, astra, opus_worker], selection: sticky_priority}
+  summary: {candidates: [sonnet, sol, flash, astra, opus_worker], selection: sticky_priority}
+  citation: {candidates: [sonnet, sol, flash, astra, opus_worker], selection: sticky_priority}
+  writing: {candidates: [sonnet, sol, flash, astra, opus_worker], selection: sticky_priority}
 
 routing:
   max_total_attempts_per_call: 6
@@ -105,17 +105,18 @@ routing:
   max_wait_seconds: 120
   unknown_rate_limit_cooldown_seconds: 120
   transient_cooldown_seconds: 15
-  max_concurrency_per_quota_group: 1
-  reserve_orchestrator_capacity: true
+  # 2 lets an orchestrator call run beside a Sonnet worker call on the Claude account.
+  max_concurrency_per_quota_group: 2
+  reserve_orchestrator_capacity: false  # Claude workers are preferred, not pushed last
 
 orchestrator_instructions: >-
-  Assign ordinary implementation, writing, extraction and small, fully specified
-  changes to Sol; broad-context integration and difficult debugging
-  to Astra; multi-step numerical or visual analysis to Flash; scoped bug fixes and
-  iterative document/code refinement to Sonnet. Treat these as starting
-  hypotheses, not guarantees, especially at low effort. Keep Opus workers as a last
-  resort because they share the Opus orchestrator's quota. Sonnet shares that group too, so prefer
-  independent providers while reserving orchestration capacity. Match the task,
+  Prefer Sonnet: assign it most implementation, plotting, writing, scoped bug fixes
+  and iterative document/code refinement. Choose another worker only for a clear
+  task-fit reason or when Sonnet is unavailable: broad-context integration and
+  difficult debugging to Astra; multi-step numerical or visual analysis to Flash;
+  routine implementation and extraction to Sol. Treat these as starting hypotheses,
+  not guarantees, especially at low effort. Keep Opus workers as a last resort because
+  they use the Opus quota that write-up and review depend on. Match the task,
   not brand reputation. Decompose
   complex work before assigning it to a low-effort worker. Preserve exact schemas,
   dataset splits, metrics and experiment budgets. Never ask a worker to invent evidence.

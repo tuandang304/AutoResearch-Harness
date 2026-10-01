@@ -31,7 +31,14 @@ class RouterTests(unittest.TestCase):
         self.log = self.directory / "routing.jsonl"
         self.usage_log = self.directory / "usage.jsonl"
         self.policy = load_policy(ROOT / "configs/llm.yaml")
-        self.policy["routing"].update(max_wait_seconds=0, transient_cooldown_seconds=1)
+        # Mechanics tests use a fixed pool order, independent of the production preference.
+        workers = ["sol", "flash", "astra", "sonnet", "opus_worker"]
+        for role in ("feedback", "summary", "citation", "writing", "plotting"):
+            self.policy["roles"][role]["candidates"] = list(workers)
+        self.policy["roles"]["code"]["candidates"] = ["sol", "astra", "flash", "sonnet", "opus_worker"]
+        self.policy["roles"]["vision"]["candidates"] = ["flash", "sol", "astra", "sonnet", "opus_worker"]
+        self.policy["routing"].update(max_wait_seconds=0, transient_cooldown_seconds=1,
+                                      max_concurrency_per_quota_group=1, reserve_orchestrator_capacity=True)
         self.save_policy()
         env = patch.dict(os.environ, {
             "AUTORESEARCH_LLM_CONFIG": str(self.path),
@@ -124,6 +131,20 @@ class RouterTests(unittest.TestCase):
             self.assertFalse(State(self.db).available("sonnet", "claude-main"))
         with patch("autoresearch.llm_router.time.time", return_value=401):
             self.assertTrue(State(self.db).available("sonnet", "claude-main"))
+
+    def test_production_policy_prefers_claude_workers(self):
+        policy = load_policy(ROOT / "configs/llm.yaml")
+        self.assertFalse(policy["routing"]["reserve_orchestrator_capacity"])
+        for role, settings in policy["roles"].items():
+            if role not in {"orchestrator", "writeup", "review"}:
+                with self.subTest(role=role):
+                    self.assertEqual(settings["candidates"][0], "sonnet")
+                    self.assertEqual(settings["candidates"][-1], "opus_worker")
+        prod = dict(policy, roles={**self.policy["roles"], "feedback": policy["roles"]["feedback"]},
+                    routing={**self.policy["routing"], "reserve_orchestrator_capacity": False})
+        self.path.write_text(yaml.safe_dump(prod))
+        self.route()
+        self.assertEqual(self.models(), ["claude-code/claude-sonnet-5-5"])
 
     def test_sonnet_is_available_in_worker_pools_not_pinned_roles(self):
         sonnet = self.policy["profiles"]["sonnet"]

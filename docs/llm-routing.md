@@ -34,7 +34,7 @@ performance at the selected effort or with this completion-only CLI interface.
 | astra_orchestrator | gpt-6-astra | medium | Orchestration fallback after Opus |
 | argon | gemini-4-argon | medium | Last orchestration fallback; unreleased, unverified |
 | opus_worker | claude-opus-5-5 | low | Last-resort bounded worker |
-| sonnet | claude-sonnet-5-5 | low | Scoped fixes and iterative editing; shared Claude quota |
+| sonnet | claude-sonnet-5-5 | low | First choice for implementation, plotting, writing and fixes; shared Claude quota |
 | astra | gpt-6-astra | low | Integration and difficult debugging |
 | sol | gpt-6.1-sol | low | Routine implementation and writing |
 | flash | gemini-3.8-flash | high | Numerical/visual analysis and multi-step work |
@@ -104,9 +104,10 @@ therefore cannot be directly transferred to this harness.
 - Output-format repairs remain bounded in the caller. They are not quota events.
 - SQLite leases cap concurrency per group across local processes. Expired/dead
   process leases can be reclaimed. This is not a distributed multi-host scheduler.
-- Claude workers (Sonnet before Opus) are ordered after independent providers to
-  reduce competition with orchestration when `reserve_orchestrator_capacity` is
-  true. This safety preference takes precedence over a selector's recommendation.
+- With `reserve_orchestrator_capacity: true`, Claude workers (Sonnet before Opus)
+  are ordered after independent providers to reduce competition with orchestration.
+  The shipped policy sets it to false and lists Sonnet first (see the 2026-10-01
+  update). This safety preference takes precedence over a selector's recommendation.
   Disable it only if you accept shared-quota contention. This
   is not a guaranteed token reservation: the CLI exposes no reliable remaining
   quota budget, and an already-running worker cannot be preempted safely.
@@ -172,6 +173,19 @@ not expose serving-model metadata in these probes.
 
 A separate routed call passed: Opus selected Luna for a bounded extraction,
 the worker returned the expected JSON, and both models were attributed separately.
+
+### Claude-first worker routing on 2026-10-01
+
+Sonnet is now first in every worker pool, and the orchestrator is told to prefer it.
+Opus workers stay last because they use the Opus quota that the pinned write-up and
+review roles need. `reserve_orchestrator_capacity` is false, since it would otherwise
+move Sonnet behind the other providers. `max_concurrency_per_quota_group` is 2,
+so an orchestrator call can run beside one Sonnet worker call; this applies to every
+quota group. More work on `claude-main` raises the chance of hitting its weekly limit.
+When it is hit, the orchestrator falls back to Astra, workers fall back to Sol,
+Flash and Astra, and the pinned write-up and review stop with `RouterUnavailable`
+(outputs retained) until the limit resets.
+Router tests pin their own pool order so routing mechanics do not depend on this preference.
 
 ### Profile update on 2026-10-01
 

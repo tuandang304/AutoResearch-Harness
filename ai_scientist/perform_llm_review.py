@@ -255,28 +255,28 @@ ONLY INCLUDE "I am done" IF YOU ARE MAKING NO MORE CHANGES."""
 
 
 def load_paper(pdf_path, num_pages=None, min_size=100):
+    # Plain PyMuPDF text first: pymupdf4llm repeated words and inline numbers in
+    # ICLR-template papers ("B loses 0 0.0082, 0, 0 ..."), which reviewers scored
+    # as presentation errors that the PDF does not contain.
     try:
-        if num_pages is None:
-            text = pymupdf4llm.to_markdown(pdf_path)
-        else:
-            reader = PdfReader(pdf_path)
-            min_pages = min(len(reader.pages), num_pages)
-            text = pymupdf4llm.to_markdown(pdf_path, pages=list(range(min_pages)))
+        doc = pymupdf.open(pdf_path)
+        pages = range(len(doc) if num_pages is None else min(len(doc), num_pages))
+        text = "".join(doc[i].get_text() for i in pages)
         if len(text) < min_size:
             raise Exception("Text too short")
     except Exception as e:
-        print(f"Error with pymupdf4llm, falling back to pymupdf: {e}")
+        print(f"Error with pymupdf, falling back to pymupdf4llm: {e}")
         try:
-            doc = pymupdf.open(pdf_path)
-            if num_pages:
-                doc = doc[:num_pages]
-            text = ""
-            for page in doc:
-                text += page.get_text()
+            if num_pages is None:
+                text = pymupdf4llm.to_markdown(pdf_path)
+            else:
+                reader = PdfReader(pdf_path)
+                min_pages = min(len(reader.pages), num_pages)
+                text = pymupdf4llm.to_markdown(pdf_path, pages=list(range(min_pages)))
             if len(text) < min_size:
                 raise Exception("Text too short")
         except Exception as e:
-            print(f"Error with pymupdf, falling back to pypdf: {e}")
+            print(f"Error with pymupdf4llm, falling back to pypdf: {e}")
             reader = PdfReader(pdf_path)
             if num_pages is None:
                 pages = reader.pages
