@@ -60,6 +60,9 @@ THREADS = max(4, 2 * (os.cpu_count() or 2))
 # pycocotools is single-threaded Python: evaluations run in subprocesses, overlapped
 # with GPU prediction (each needs a few GB of RAM for the larger groups)
 EVAL_WORKERS = int(os.environ.get("UAV_EVAL_WORKERS", max(1, min(6, (os.cpu_count() or 2) - 2))))
+# Bootstrap resamples run in this many fresh subprocesses (results are identical to a
+# sequential run: the resampling draws are made in the caller, in the same order).
+BOOT_WORKERS = int(os.environ.get("UAV_BOOT_WORKERS", max(1, min(4, (os.cpu_count() or 2) - 1))))  # memory-bound: 4 was fastest
 STATE_GROUPS = ("night_test", "twilight_test")  # groups whose bootstrap state is kept
 STATE_AREAS = ("all", "small_all", "medium")  # area bins kept by save_state
 ENHANCED_GROUPS = ("night_test",)  # groups also evaluated with gamma and CLAHE
@@ -635,22 +638,79 @@ def weighted_ap(state, area="small_all", weights=None):
     return float(np.mean(values)) if values else float("nan")
 
 
+def _resample_weights(clips, n, seed):
+    """Per-image weights of n clip resamples (all frames of a clip together)."""
+    unique = sorted(set(clips))
+    member = np.array([unique.index(c) for c in clips])
+    rng = np.random.default_rng(seed)
+    return [np.bincount(rng.integers(0, len(unique), len(unique)), minlength=len(unique))[member]
+            for _ in range(n)], unique
+
+
+def _slim(state, area):
+    """The cells of one area bin only (smaller to send to a worker process)."""
+    a = state["areas"].index(area)
+    return dict(state, cells={key: c for key, c in state["cells"].items() if key[1] == a})
+
+
+def _mean_diffs(pairs, area, weights):
+    return [float(np.mean([weighted_ap(x, area, w) - weighted_ap(y, area, w) for x, y in pairs]))
+            for w in weights]
+
+
+def _mean_diffs_parallel(pairs, area, weights):
+    """_mean_diffs split over BOOT_WORKERS fresh interpreters (never forked after CUDA)."""
+    import pickle
+    import subprocess
+    import sys
+    import tempfile
+
+    workers = min(BOOT_WORKERS, max(1, len(weights) // 50))
+    if workers <= 1:
+        return _mean_diffs(pairs, area, weights)
+    tmp = RUNS / "boot_tmp"
+    tmp.mkdir(parents=True, exist_ok=True)
+    fd, shared = tempfile.mkstemp(dir=tmp, suffix=".states.pkl")
+    os.close(fd)
+    files = [shared]
+    code = ("import pickle, sys; sys.path.insert(0, sys.argv[4]); import uavlib; "
+            "pairs, area = pickle.load(open(sys.argv[1], 'rb')); w = pickle.load(open(sys.argv[2], 'rb')); "
+            "pickle.dump(uavlib._mean_diffs(pairs, area, w), open(sys.argv[3], 'wb'))")
+    try:
+        with open(shared, "wb") as f:
+            pickle.dump(([(_slim(x, area), _slim(y, area)) for x, y in pairs], area), f, protocol=4)
+        chunks = np.array_split(np.arange(len(weights)), workers)
+        procs = []
+        for i, idx in enumerate(chunks):
+            inp, out = shared.replace(".states.pkl", f".w{i}.pkl"), shared.replace(".states.pkl", f".d{i}.pkl")
+            files += [inp, out]
+            with open(inp, "wb") as f:
+                pickle.dump([weights[j] for j in idx], f, protocol=4)
+            procs.append((out, subprocess.Popen([sys.executable, "-c", code, shared, inp, out,
+                                                 str(Path(__file__).resolve().parent)],
+                                                stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)))
+        diffs = []
+        for out, proc in procs:
+            _, err = proc.communicate()
+            if proc.returncode != 0:
+                raise RuntimeError(f"bootstrap worker failed: {err[-2000:]}")
+            with open(out, "rb") as f:
+                diffs += pickle.load(f)
+        return diffs
+    finally:
+        for path in files:
+            Path(path).unlink(missing_ok=True)
+
+
 def paired_clip_bootstrap(state_x, state_y, area="small_all", n=1000, seed=0):
     """AP(x) - AP(y) on the same images, with a percentile 95% CI from resampling
     clips (all frames of a clip together) with replacement."""
     clips = np.asarray(state_x["clips"])
     if list(clips) != list(state_y["clips"]):
         raise ValueError("paired bootstrap needs both states on the same images")
-    unique = sorted(set(clips))
-    member = np.array([unique.index(c) for c in clips])
-    rng = np.random.default_rng(seed)
+    weights, unique = _resample_weights(list(clips), n, seed)
     point = weighted_ap(state_x, area) - weighted_ap(state_y, area)
-    diffs = []
-    for _ in range(n):
-        counts = np.bincount(rng.integers(0, len(unique), len(unique)), minlength=len(unique))
-        w = counts[member]
-        diffs.append(weighted_ap(state_x, area, w) - weighted_ap(state_y, area, w))
-    diffs = np.asarray(diffs)
+    diffs = np.asarray(_mean_diffs_parallel([(state_x, state_y)], area, weights))
     lo, hi = np.nanpercentile(diffs, [2.5, 97.5])
     return dict(diff=point, ci95=[float(lo), float(hi)], p_diff_le_0=float(np.mean(diffs <= 0)),
                 n_boot=n, n_clips=len(unique), area=area)
@@ -821,15 +881,9 @@ def pooled_clip_bootstrap(pairs, area="small_all", n=1000, seed=0):
     clips = list(pairs[0][0]["clips"])
     if any(list(x["clips"]) != clips or list(y["clips"]) != clips for x, y in pairs):
         raise ValueError("pooled_clip_bootstrap needs every state on the same images")
-    unique = sorted(set(clips))
-    member = np.array([unique.index(c) for c in clips])
-    rng = np.random.default_rng(seed)
+    weights, unique = _resample_weights(clips, n, seed)
     point = float(np.mean([weighted_ap(x, area) - weighted_ap(y, area) for x, y in pairs]))
-    diffs = []
-    for _ in range(n):
-        w = np.bincount(rng.integers(0, len(unique), len(unique)), minlength=len(unique))[member]
-        diffs.append(np.mean([weighted_ap(x, area, w) - weighted_ap(y, area, w) for x, y in pairs]))
-    diffs = np.asarray(diffs)
+    diffs = np.asarray(_mean_diffs_parallel(pairs, area, weights))
     lo, hi = np.nanpercentile(diffs, [2.5, 97.5])
     return dict(diff=point, ci95=[float(lo), float(hi)], p_diff_le_0=float(np.mean(diffs <= 0)),
                 n_boot=n, n_clips=len(unique), n_seeds=len(pairs), area=area)

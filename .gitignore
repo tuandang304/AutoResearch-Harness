@@ -199,6 +199,7 @@ huggingface/
 remote_executor.json
 
 # Generated research artifacts stay inside their owning project.
+projects/
 projects/*/runs/
 projects/*/archive/
 projects/*/artifacts/
