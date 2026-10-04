@@ -91,7 +91,7 @@ because unauthenticated Semantic Scholar searches are mostly rate limited;
 `OPENALEX_MAILTO` optionally adds a contact address to OpenAlex requests.
 
 Stage-4 ablations receive the stage-3 baseline's saved results in `parent_results/`;
-v1 of the UAV study lost every ablation because scripts could not load them. The
+Earlier studies lost every ablation because scripts could not load them. The
 tree search now passes each stage's plot code by keyword; positional passing had sent
 stage-1 plot code where stage-3 code was expected. `multi_seed_eval.reuse_evaluated_node`
 avoids rerunning a seed that the evaluated node already ran.

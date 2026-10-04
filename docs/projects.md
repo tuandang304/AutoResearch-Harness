@@ -58,11 +58,6 @@ The shared bfts_config.yaml moved to configs/default.yaml. Generic examples move
 to projects/regularization/. Update scripts referencing their old paths. The
 root launcher and engine import paths remain supported.
 
-Historical results moved intact from experiments/ to
-projects/uav-lowlight/archive/experiments/. No experiment data was deleted or
-rewritten. Embedded absolute paths may refer to old locations: resolve them
-manually when inspecting archived artifacts. This is not transparent resume.
-
 Old public UAV validation guidance and input were removed. A small execution
 configuration remains in tests/fixtures/pipeline.yaml solely for regression tests.
 New studies use the normal shared defaults or their own full configuration.

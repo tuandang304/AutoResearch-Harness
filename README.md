@@ -17,7 +17,6 @@ projects/
     brief.md                 Question and constraints
     ideas.json               Pipeline input
     runs/                    Created on execution; gitignored
-  uav-lowlight/              Research brief and preserved local archive/
   time-series/               Another example research brief
 docs/                        Architecture, project workflow, remote execution
 notebooks/                   Colab GPU executor

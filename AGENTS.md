@@ -13,8 +13,6 @@ Keep ai_scientist imports and AI_SCIENTIST_* compatibility settings intact.
 - Use --project to keep outputs with their study. Explicit --config, --load_ideas
   and --output-dir override project paths. Do not edit historical run snapshots.
 - Never print remote_executor.json tokens or commit credentials/notebook outputs.
-- Archived UAV results are in projects/uav-lowlight/archive/experiments. Embedded
-  absolute paths may be stale; historical records are not resumable jobs.
 
 ## Models and execution
 
