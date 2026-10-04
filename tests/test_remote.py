@@ -20,6 +20,7 @@ from ai_scientist.treesearch.remote_interpreter import (
     RemoteInterpreter,
     load_remote_config,
     RemoteExecutorUnavailable,
+    WorkspaceRetrievalError,
 )
 
 
@@ -73,6 +74,31 @@ class ArchiveTests(unittest.TestCase):
                 self.assertIsNone(interpreter.run("print('ok')").exc_type)
             self.assertEqual(len(submitted), 2)
             self.assertNotEqual(submitted[0], submitted[1])
+
+    def test_unpackable_workspace_keeps_finished_job(self):
+        def request(method, path, **kwargs):
+            response = requests.Response()
+            response.status_code = 200
+            if method == "POST":
+                body = {"job_id": kwargs["json"]["job_id"]}
+            elif path.endswith("/workspace"):
+                response.status_code = 422
+                body = {"error": "Compressed workspace exceeds transfer limit"}
+            else:
+                body = {"status": "done", "result": {"term_out": ["ok"], "exec_time": 0.1,
+                        "exc_type": None, "exc_info": None, "exc_stack": None}}
+            response._content = json.dumps(body).encode()
+            return response
+
+        with tempfile.TemporaryDirectory() as directory, patch(
+            "ai_scientist.treesearch.remote_interpreter.POLL_SECONDS", 0
+        ), patch("ai_scientist.treesearch.remote_interpreter.requests.delete") as delete:
+            interpreter = RemoteInterpreter(directory)
+            with patch.object(interpreter, "_request", side_effect=request):
+                with self.assertRaises(WorkspaceRetrievalError) as ctx:
+                    interpreter.run("print('ok')")
+            self.assertTrue(ctx.exception.job_id)
+            delete.assert_not_called()
 
     def test_paths_links_and_devices_rejected(self):
         for name, kind in (

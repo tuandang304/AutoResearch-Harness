@@ -42,6 +42,16 @@ class RemoteExecutorUnavailable(RuntimeError):
     pass
 
 
+class WorkspaceRetrievalError(RuntimeError):
+    """The job finished but its workspace could not be packed (e.g. over the transfer
+    limit). The remote job is kept, not deleted, so outputs can be fetched before the
+    server TTL; ``job_id`` names it."""
+
+    def __init__(self, message, job_id):
+        super().__init__(message)
+        self.job_id = job_id
+
+
 class PoolClosed(RemoteExecutorUnavailable):
     """The managed Colab pool can run no more jobs (released, budget spent, low
     balance or no CLI). Unlike other unavailability, waiting does not help."""
@@ -388,6 +398,16 @@ class RemoteInterpreter:
                 continue
 
             resp = self._request("GET", f"/jobs/{self._job_id}/workspace")
+            if resp.status_code == 422:
+                job_id, self._job_id = self._job_id, None  # keep it for manual retrieval
+                try:
+                    reason = resp.json().get("error")
+                except ValueError:
+                    reason = resp.text[:200]
+                logger.error("Remote job %s finished but its workspace was not returned (%s); "
+                             "kept on the executor until the server TTL", job_id, reason)
+                raise WorkspaceRetrievalError(
+                    f"workspace of finished job {job_id} not returned: {reason}", job_id)
             resp.raise_for_status()
             skipped = json.loads(resp.headers.get("X-Skipped-Files", "[]"))
             received = self._apply_workspace(resp.content, sent, skipped)

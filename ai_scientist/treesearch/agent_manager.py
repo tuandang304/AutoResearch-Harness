@@ -743,7 +743,9 @@ Your research idea:\n\n
 
                     # Run until sub-stage completion
                     while True:
-                        agent.step(exec_callback)
+                        remaining = max(0, current_substage.max_iterations -
+                                        len(self.journals[current_substage.name].nodes))
+                        agent.step(exec_callback, max_nodes=remaining)
                         if step_callback:
                             step_callback(
                                 current_substage, self.journals[current_substage.name]

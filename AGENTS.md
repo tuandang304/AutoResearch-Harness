@@ -19,10 +19,13 @@ Keep ai_scientist imports and AI_SCIENTIST_* compatibility settings intact.
 ## Models and execution
 
 Read docs/llm-routing.md. configs/llm.yaml orders the orchestrator as
-claude-opus-5-5 medium, then gpt-6-astra medium, then gemini-4-argon medium
-(unreleased, unverified). Workers: gpt-6.1-sol, gpt-6-astra, claude-sonnet-5-5,
-claude-opus-5-5 low; gemini-3.8-flash high. Sonnet is first in every worker pool;
-Opus workers are last-resort, sharing the write-up/review quota.
+claude-code/claude-opus-5-5 high, then codex/gpt-6-astra high, then
+antigravity/claude-opus-5.5 high. Workers: claude-code/sonnet-5-5 medium,
+codex/gpt-6.1-sol medium, antigravity/claude-opus-5.5 high. Task-specific worker
+pools prefer Sonnet for coding/writing, Sol for extraction/summaries and Antigravity
+Opus for analytical/visual feedback. Write-up and review stay pinned to Claude Code
+Opus. Independent completion batches use routing.max_parallel_subagents; experiment
+processes use agent.num_workers. Both retain shared account quota leases.
 Do not silently substitute IDs or effort. Policy binds before provider/model overrides.
 autoresearch/llm_router.py owns assignment, shared cooldowns and per-call provenance.
 cli_llm.py translates per-call effort; legacy Codex env settings remain supported.

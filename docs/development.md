@@ -99,7 +99,7 @@ avoids rerunning a seed that the evaluated node already ran.
 The paper review reads plain PyMuPDF text first. `pymupdf4llm` repeated words and inline
 numbers in ICLR-template PDFs, which reviewers scored as typos; it is now the fallback.
 
-The orchestrator role may use an ordered `fallback` selection (Opus, Astra, Argon in
+The orchestrator role may use an ordered `fallback` selection (Claude Code Opus, Codex Astra, Antigravity Opus in
 `configs/llm.yaml`). It is not sticky, does not skip a busy profile, and cannot use
 `orchestrator` selection itself.
 
@@ -124,3 +124,19 @@ submission, input limits, restricted archive extraction and explicit artifact
 retention. Seed workers receive independent inputs, and restoring a journal
 node no longer modifies its source dictionary. Shared usage accounting and
 regression tests make these behaviors reviewable.
+
+## Parallel completion sub-agents
+
+Independent CLI completion batches use a bounded thread pool controlled by
+`routing.max_parallel_subagents` (three in the shipped policy, one for older
+policies). Each child gets an independent message copy and routes through the same
+capability filtering, quota leases, cooldowns and provenance as a single call.
+Results retain input order and per-choice model/token attribution. Failed batches
+cancel queued work, wait for active children to finish cleanup, then propagate the
+failure, including `RouterUnavailable`. Concrete model overrides retain serial
+batch behavior. This mechanism generates independent completions; it does not
+execute arbitrary model-proposed tool tasks or overlap dependent research stages.
+
+The existing experiment process pool defaults to three workers, separately
+controlled by `agent.num_workers` / `--num-workers` and local GPU availability.
+Project configurations remain complete replacements and keep their own limits.

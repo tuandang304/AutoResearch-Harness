@@ -2206,7 +2206,7 @@ class ParallelAgent:
             leaves.extend(self._get_leaves(child))
         return leaves
 
-    def _select_parallel_nodes(self) -> List[Optional[Node]]:
+    def _select_parallel_nodes(self, max_nodes=None) -> List[Optional[Node]]:
         """Select N nodes to process in parallel,
         balancing between tree exploration and exploitation.
         Note:
@@ -2221,15 +2221,20 @@ class ParallelAgent:
         processed_trees = set()
         search_cfg = self.cfg.agent.search
         print(f"[cyan]self.num_workers: {self.num_workers}, [/cyan]")
+        batch_limit = self.num_workers if max_nodes is None else min(self.num_workers, max_nodes)
 
-        while len(nodes_to_process) < self.num_workers:
+        while len(nodes_to_process) < batch_limit:
             # Initial drafting phase, creating root nodes
             print(
                 f"Checking draft nodes... num of journal.draft_nodes: {len(self.journal.draft_nodes)}, search_cfg.num_drafts: {search_cfg.num_drafts}"
             )
-            if len(self.journal.draft_nodes) < search_cfg.num_drafts:
+            pending_drafts = sum(node is None for node in nodes_to_process)
+            if len(self.journal.draft_nodes) + pending_drafts < search_cfg.num_drafts:
                 nodes_to_process.append(None)
                 continue
+            if pending_drafts and not self.journal.nodes:
+                # The first drafts must return before we can improve/debug them.
+                break
 
             # Get viable trees
             viable_trees = [
@@ -2296,6 +2301,8 @@ class ParallelAgent:
                 print("Checking good nodes..")
                 good_nodes = self.journal.good_nodes
                 if not good_nodes:
+                    if pending_drafts:
+                        break
                     nodes_to_process.append(None)  # Back to drafting
                     continue
 
@@ -2328,10 +2335,12 @@ class ParallelAgent:
 
         return nodes_to_process
 
-    def step(self, exec_callback: ExecCallbackType):
+    def step(self, exec_callback: ExecCallbackType, *, max_nodes=None):
         print("Selecting nodes to process")
-        nodes_to_process = self._select_parallel_nodes()
+        nodes_to_process = self._select_parallel_nodes(max_nodes=max_nodes)
         print(f"Selected nodes: {[n.id if n else None for n in nodes_to_process]}")
+        if not nodes_to_process:
+            return
 
         # Convert nodes to dicts
         node_data_list = []

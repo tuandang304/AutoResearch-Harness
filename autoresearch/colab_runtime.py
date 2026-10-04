@@ -1140,7 +1140,9 @@ def main(argv=None):
                 settings, executor_path=args.executor_config or _config_path(),
                 max_concurrent=args.max_concurrent, session=args.session)
             pool.preflight()
-            tier, key, path, notes, _ = pool.acquire()
+            placed = pool.acquire()
+            pool.release(placed.key, placed.token)  # no job follows; drop the load reservation
+            tier, key, path, notes = placed.tier, placed.key, placed.path, placed.notes
             entry = pool.load()["sessions"][key]
             for note in notes:
                 print(f"Skipped: {note}")

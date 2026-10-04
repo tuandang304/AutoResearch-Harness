@@ -21,6 +21,8 @@ so the existing call sites keep working.
 """
 
 import base64
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+from copy import deepcopy
 import json
 import logging
 import os
@@ -753,6 +755,53 @@ def parse_json_output(text: str) -> Any:
 # --------------------------------------------------------------------------- #
 
 
+def _completion_batch(model, messages, count):
+    """Run independent completion sub-agents with bounded, ordered results.
+
+    Each child retains the router's quota leases, retries and provenance. Concrete
+    overrides and older policies remain serial. Running children finish cleanup
+    before a failed batch propagates its original exception; queued work is
+    cancelled and no replacement children are launched after a known failure.
+    """
+    parallelism = 1
+    if count > 1 and model.startswith("router/"):
+        from autoresearch.llm_router import ROOT, load_policy
+
+        policy = load_policy(os.environ.get("AUTORESEARCH_LLM_CONFIG", ROOT / "configs/llm.yaml"))
+        parallelism = policy["routing"].get("max_parallel_subagents", 1)
+    if parallelism == 1 or count <= 1:
+        return [complete(model, messages) for _ in range(count)]
+
+    results = [None] * count
+    # Submit only as many children as can run. This keeps both active calls and
+    # queued copies of potentially large image prompts bounded.
+    with ThreadPoolExecutor(max_workers=min(count, parallelism),
+                            thread_name_prefix="llm-subagent") as executor:
+        pending = {}
+        next_index = 0
+
+        def submit_one():
+            nonlocal next_index
+            future = executor.submit(complete, model, deepcopy(messages))
+            pending[future] = next_index
+            next_index += 1
+
+        try:
+            for _ in range(min(count, parallelism)):
+                submit_one()
+            while pending:
+                finished, _ = wait(pending, return_when=FIRST_COMPLETED)
+                for future in finished:
+                    results[pending.pop(future)] = future.result()
+                for _ in range(min(len(finished), count - next_index)):
+                    submit_one()
+        except BaseException:
+            for future in pending:
+                future.cancel()
+            raise
+    return results
+
+
 class _Completions:
     def __init__(self, client: "CLIClient"):
         self._client = client
@@ -766,8 +815,7 @@ class _Completions:
             "reasoning": 0,
         }
         selected_models = []
-        for i in range(n or 1):
-            text, usage = complete(model, messages or [])
+        for i, (text, usage) in enumerate(_completion_batch(model, messages or [], n or 1)):
             actual_model = usage.get("model", model)
             selected_models.append(actual_model)
             for k in totals:

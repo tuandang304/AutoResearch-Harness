@@ -89,7 +89,10 @@ def load_policy(path):
         "max_total_attempts_per_call": (1, 20), "transient_retries_per_profile": (0, 3),
         "max_wait_seconds": (0, 3600), "unknown_rate_limit_cooldown_seconds": (1, 86400),
         "transient_cooldown_seconds": (1, 3600), "max_concurrency_per_quota_group": (1, 16),
+        "max_parallel_subagents": (1, 16),
     }
+    # Older policy snapshots retain serial completion batches. No runtime state is opened.
+    routing.setdefault("max_parallel_subagents", 1)
     if set(routing) != set(numeric) | {"reserve_orchestrator_capacity"}:
         raise ValueError("Missing or unknown routing options")
     for key, (minimum, maximum) in numeric.items():

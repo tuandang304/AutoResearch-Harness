@@ -65,7 +65,7 @@ codex_reasoning_effort: low
 agent:
   orchestrator: {model: router/orchestrator, temp: 0.2}
   type: parallel
-  num_workers: 1
+  num_workers: 3  # independent experiment sub-agents; local GPU count may cap this
   stages:
     stage1_max_iters: 20
     stage2_max_iters: 12

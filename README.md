@@ -67,17 +67,23 @@ selects projects/regularization. Always select your study for real research.
 
 ## Models
 
-Default orchestrator: **Claude Opus 5.5, medium effort**. Worker pool:
-**GPT-6-Sol, GPT-6-Luna, GPT-6-Astra, Sonnet 5.5 and Opus 5.5 at low effort**, plus
-**Gemini 3.8 Flash at high effort**. Exact IDs, task instructions and quota groups
-live in [configs/llm.yaml](configs/llm.yaml).
+Orchestrators fall back in order: **claude-code/claude-opus-5-5**, **codex/gpt-6-astra**,
+then **antigravity/claude-opus-5.5**, all at **high effort**. Workers are
+**claude-code/sonnet-5-5** and **codex/gpt-6.1-sol** at **medium effort**, plus
+**antigravity/claude-opus-5.5** at **high effort**. Exact profiles, task instructions
+and quota groups live in [configs/llm.yaml](configs/llm.yaml).
 
-Opus selects coding/plotting workers from their documented task strengths;
-routine roles use priority pools. Rate limits trigger bounded, quota-aware
-fallback. Opus workers are last-resort to conserve orchestrator availability.
-Pinned orchestration never silently substitutes another model.
-See [routing and model research](docs/llm-routing.md) for behavior, limitations,
-policy precedence and opt-in live ID verification.
+The orchestrator selects coding/plotting workers by task fit. Sonnet handles scoped
+implementation and writing; Sol handles extraction and summaries; Antigravity Opus
+handles deeper analysis and visual review. These assignments require evaluation.
+Write-up and final review remain pinned to Claude Code Opus. See
+[routing](docs/llm-routing.md) for precedence, bounded fallback and verification.
+
+Three experiment sub-agents run concurrently by default (`--num-workers` overrides
+this; local GPU availability can cap it). Independent routed completion batches,
+such as ensemble reviews, use up to three parallel sub-agents via
+`routing.max_parallel_subagents`. Shared account leases still cap concurrent model
+calls at two per quota group. Dependent research stages remain sequential.
 
 The orchestrator decides stages, proposes tuning/ablations, selects results, and
 writes/reviews the final paper. Workers implement/debug code, extract metrics,

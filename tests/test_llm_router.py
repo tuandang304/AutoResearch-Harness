@@ -30,8 +30,9 @@ class RouterTests(unittest.TestCase):
         self.db = self.directory / "state" / "router.sqlite"
         self.log = self.directory / "routing.jsonl"
         self.usage_log = self.directory / "usage.jsonl"
-        self.policy = load_policy(ROOT / "configs/llm.yaml")
-        # Mechanics tests use a fixed pool order, independent of the production preference.
+        # Freeze the richer legacy topology to exercise shared models/accounts and
+        # fallback mechanics independently of changes to the production roster.
+        self.policy = load_policy(ROOT / "tests/fixtures/llm_router.yaml")
         workers = ["sol", "flash", "astra", "sonnet", "opus_worker"]
         for role in ("feedback", "summary", "citation", "writing", "plotting"):
             self.policy["roles"][role]["candidates"] = list(workers)
@@ -132,19 +133,101 @@ class RouterTests(unittest.TestCase):
         with patch("autoresearch.llm_router.time.time", return_value=401):
             self.assertTrue(State(self.db).available("sonnet", "claude-main"))
 
-    def test_production_policy_prefers_claude_workers(self):
+    def test_production_policy_has_exact_models_efforts_and_task_assignments(self):
         policy = load_policy(ROOT / "configs/llm.yaml")
+        expected = {
+            "opus": ("claude-code", "claude-opus-5-5", "high"),
+            "astra_orchestrator": ("codex", "gpt-6-astra", "high"),
+            "antigravity_opus_orchestrator": ("antigravity", "claude-opus-5.5", "high"),
+            "sonnet": ("claude-code", "sonnet-5-5", "medium"),
+            "sol": ("codex", "gpt-6.1-sol", "medium"),
+            "antigravity_opus": ("antigravity", "claude-opus-5.5", "high"),
+        }
+        self.assertEqual({name: tuple(profile[key] for key in ("provider", "model", "effort"))
+                          for name, profile in policy["profiles"].items()}, expected)
         self.assertFalse(policy["routing"]["reserve_orchestrator_capacity"])
-        for role, settings in policy["roles"].items():
-            if role not in {"orchestrator", "writeup", "review"}:
-                with self.subTest(role=role):
-                    self.assertEqual(settings["candidates"][0], "sonnet")
-                    self.assertEqual(settings["candidates"][-1], "opus_worker")
-        prod = dict(policy, roles={**self.policy["roles"], "feedback": policy["roles"]["feedback"]},
-                    routing={**self.policy["routing"], "reserve_orchestrator_capacity": False})
-        self.path.write_text(yaml.safe_dump(prod))
-        self.route()
-        self.assertEqual(self.models(), ["claude-code/claude-sonnet-5-5"])
+        self.assertEqual(policy["routing"]["max_parallel_subagents"], 3)
+        assignments = {
+            "orchestrator": ("fallback", ["opus", "astra_orchestrator", "antigravity_opus_orchestrator"]),
+            "writeup": ("pinned", ["opus"]),
+            "review": ("pinned", ["opus"]),
+            "code": ("orchestrator", ["sonnet", "sol", "antigravity_opus"]),
+            "plotting": ("orchestrator", ["sonnet", "sol", "antigravity_opus"]),
+            "feedback": ("sticky_priority", ["antigravity_opus", "sonnet", "sol"]),
+            "vision": ("sticky_priority", ["antigravity_opus", "sonnet", "sol"]),
+            "summary": ("sticky_priority", ["sol", "sonnet", "antigravity_opus"]),
+            "citation": ("sticky_priority", ["sol", "sonnet", "antigravity_opus"]),
+            "writing": ("sticky_priority", ["sonnet", "sol", "antigravity_opus"]),
+        }
+        self.assertEqual({role: (settings["selection"], settings["candidates"])
+                          for role, settings in policy["roles"].items()}, assignments)
+
+    def test_production_routing_dispatches_task_specific_models_and_efforts(self):
+        self.policy = load_policy(ROOT / "configs/llm.yaml")
+        self.policy["routing"]["max_wait_seconds"] = 0
+        self.save_policy()
+        for role, model, effort in (
+            ("feedback", "antigravity/claude-opus-5.5", "high"),
+            ("summary", "codex/gpt-6.1-sol", "medium"),
+            ("writing", "claude-code/sonnet-5-5", "medium"),
+        ):
+            with self.subTest(role=role):
+                self.complete.reset_mock()
+                self.route(role)
+                self.assertEqual(self.models(), [model])
+                self.assertEqual(self.complete.call_args.kwargs["effort"], effort)
+
+    def test_production_orchestrator_uses_high_effort_fallbacks(self):
+        self.policy = load_policy(ROOT / "configs/llm.yaml")
+        self.policy["routing"]["max_wait_seconds"] = 0
+        self.save_policy()
+        self.complete.side_effect = [CLIError("quota exhausted"), CLIError("quota exhausted"), ("done", {})]
+        self.assertEqual(self.route("orchestrator")[0], "done")
+        self.assertEqual(self.models(), ["claude-code/claude-opus-5-5", "codex/gpt-6-astra",
+                                        "antigravity/claude-opus-5.5"])
+        self.assertEqual([call.kwargs["effort"] for call in self.complete.call_args_list], ["high"] * 3)
+
+    def test_production_selector_dispatches_requested_worker_and_effort(self):
+        self.policy = load_policy(ROOT / "configs/llm.yaml")
+        self.policy["routing"]["max_wait_seconds"] = 0
+        self.save_policy()
+        self.complete.side_effect = [
+            (json.dumps({"profile": "antigravity_opus", "reason": "complex numerical analysis"}), {}),
+            ("done", {}),
+        ]
+        self.assertEqual(self.route("code")[0], "done")
+        self.assertEqual(self.models(), ["claude-code/claude-opus-5-5", "antigravity/claude-opus-5.5"])
+        self.assertEqual([call.kwargs["effort"] for call in self.complete.call_args_list], ["high", "high"])
+
+    def test_production_antigravity_aliases_share_limits_but_claude_code_is_independent(self):
+        self.policy = load_policy(ROOT / "configs/llm.yaml")
+        self.policy["routing"]["max_wait_seconds"] = 0
+        self.save_policy()
+        self.complete.side_effect = [CLIError("429 model rate limit"), ("done", {})]
+        self.assertEqual(self.route("feedback")[0], "done")
+        self.assertEqual(self.models(), ["antigravity/claude-opus-5.5", "claude-code/sonnet-5-5"])
+        state = State(self.db)
+        for name in ("antigravity_opus", "antigravity_opus_orchestrator"):
+            self.assertFalse(state.available(name, self.policy["profiles"][name]["quota_group"]))
+        self.assertTrue(state.available("opus", self.policy["profiles"]["opus"]["quota_group"]))
+
+    def test_parallel_subagent_limit_is_optional_bounded_integer_without_state(self):
+        self.policy["routing"].pop("max_parallel_subagents", None)
+        self.save_policy()
+        self.assertEqual(load_policy(self.path)["routing"].get("max_parallel_subagents", 1), 1)
+        for value in (1, 3, 16):
+            with self.subTest(value=value):
+                self.policy["routing"]["max_parallel_subagents"] = value
+                self.save_policy()
+                self.assertEqual(load_policy(self.path)["routing"]["max_parallel_subagents"], value)
+        for value in (0, 17, -1, True, 2.5, "3", None):
+            with self.subTest(value=value):
+                self.policy["routing"]["max_parallel_subagents"] = value
+                self.save_policy()
+                with self.assertRaisesRegex(ValueError, "max_parallel_subagents"):
+                    load_policy(self.path)
+        self.assertFalse(self.db.exists())
+        self.complete.assert_not_called()
 
     def test_sonnet_is_available_in_worker_pools_not_pinned_roles(self):
         sonnet = self.policy["profiles"]["sonnet"]

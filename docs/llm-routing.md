@@ -30,35 +30,26 @@ performance at the selected effort or with this completion-only CLI interface.
 
 | Profile | Exact ID | Effort | Initial assignment |
 |---|---|---|---|
-| opus | claude-opus-5-5 | medium | Orchestration, manuscript decisions and final review |
-| astra_orchestrator | gpt-6-astra | medium | Orchestration fallback after Opus |
-| argon | gemini-4-argon | medium | Last orchestration fallback; unreleased, unverified |
-| opus_worker | claude-opus-5-5 | low | Last-resort bounded worker |
-| sonnet | claude-sonnet-5-5 | low | First choice for implementation, plotting, writing and fixes; shared Claude quota |
-| astra | gpt-6-astra | low | Integration and difficult debugging |
-| sol | gpt-6.1-sol | low | Routine implementation and writing |
-| flash | gemini-3.8-flash | high | Numerical/visual analysis and multi-step work |
+| opus | claude-code/claude-opus-5-5 | high | Primary orchestration, manuscript decisions, final review |
+| astra_orchestrator | codex/gpt-6-astra | high | Cross-component reasoning and orchestration fallback |
+| antigravity_opus_orchestrator | antigravity/claude-opus-5.5 | high | Research synthesis and final orchestration fallback |
+| sonnet | claude-code/sonnet-5-5 | medium | Scoped coding, iterative fixes and writing |
+| sol | codex/gpt-6.1-sol | medium | Reproducible implementation, extraction, summaries and citation assistance |
+| antigravity_opus | antigravity/claude-opus-5.5 | high | Difficult debugging, numerical analysis, visual and evidence review |
 
-Research checked 2026-09-29:
+The 2026-10-04 policy uses the exact IDs and efforts requested by the user. Task
+assignments are engineering hypotheses informed by the earlier
+[Anthropic Sonnet guidance](https://www.anthropic.com/claude-sonnet-5-5),
+[OpenAI model selection guidance](https://developers.openai.com/api/docs/guides/model-selection)
+and [Opus prompting guidance](https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/prompting-claude-opus-5-5).
+Those sources do not verify these exact endpoint IDs or compare these effort settings.
+No live access or quality probe was run for this policy update. Historical probes
+below apply only to their recorded IDs and efforts.
 
-- [Anthropic Sonnet 5.5 introduction](https://www.anthropic.com/claude-sonnet-5-5)
-  positions Sonnet for bounded everyday work, bug fixes and iterative deliverables.
-  We use low effort for its worker role, subject to task-level evaluation.
-
-- [OpenAI model selection](https://developers.openai.com/api/docs/guides/model-selection)
-  distinguishes efficient scoped work, general-purpose judgment, and broader
-  demanding tasks. Low effort is not evidence of top benchmark performance.
-- [Anthropic Opus prompting guidance](https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/prompting-claude-opus-5-5)
-  supports medium as a starting point and emphasizes concrete completion criteria.
-- [Google Flash guidance](https://ai.google.dev/gemini-api/docs/latest-model?hl=en)
-  describes high thinking for complex reasoning and multi-step tasks; it can use
-  more tokens, so high effort should not be assumed cheapest.
-
-Exact IDs are explicit; `opus`, `default`, and display-name guesses are not used
-in profiles. All GPT profiles conservatively share `codex-main`, and both Opus
-profiles and Sonnet share `claude-main`. These groupings are local account assumptions,
-not a claim about every provider's limit structure. Adjust only after confirming
-which credentials and limits are independent.
+Claude Code profiles share `claude-main`; Codex profiles share `codex-main`;
+Antigravity profiles share `antigravity-main`. The two Antigravity Opus roles
+share the same model and quota. Separate CLI accounts are assumed to have
+independent quotas; change groups if account limits are actually shared.
 
 ## How assignment works
 
@@ -69,8 +60,8 @@ not sent to the selector; the worker receives the full original image content.
 Long task context is truncated for selection only, not for execution.
 
 The orchestrator role is an ordered `fallback`: every call starts with Opus, moves
-to Astra (medium) only when Opus is in cooldown or its call fails, and to Argon
-after Astra. A busy but available profile is waited for rather than skipped, and
+to Astra (high) only when Opus is in cooldown or its call fails, and to
+Antigravity Opus (high) after Astra. A busy but available profile is waited for rather than skipped, and
 there is no stickiness, so Opus is used again as soon as its cooldown ends.
 `writeup` and `review` stay pinned to Opus. Each call records the profile that
 answered in `routing.jsonl`.
@@ -104,13 +95,18 @@ therefore cannot be directly transferred to this harness.
 - Output-format repairs remain bounded in the caller. They are not quota events.
 - SQLite leases cap concurrency per group across local processes. Expired/dead
   process leases can be reclaimed. This is not a distributed multi-host scheduler.
-- With `reserve_orchestrator_capacity: true`, Claude workers (Sonnet before Opus)
-  are ordered after independent providers to reduce competition with orchestration.
-  The shipped policy sets it to false and lists Sonnet first (see the 2026-10-01
-  update). This safety preference takes precedence over a selector's recommendation.
-  Disable it only if you accept shared-quota contention. This
-  is not a guaranteed token reservation: the CLI exposes no reliable remaining
-  quota budget, and an already-running worker cannot be preempted safely.
+- With `reserve_orchestrator_capacity: true`, workers sharing the primary
+  orchestrator's account are ordered after independent providers. The shipped
+  policy sets it to false so task-specific preferences take precedence. Leases
+  limit concurrent requests but do not reserve a token budget.
+- `max_parallel_subagents` bounds independent routed completion batches (1–16,
+  shipped value 3; omitted means 1). Each child routes separately, with copied
+  prompts and ordered results. Shared quota leases still apply across threads and
+  local processes. On failure queued work is cancelled, active children finish
+  cleanup, and the original failure propagates. Concrete overrides remain serial.
+- Experiment sub-agents use the existing process pool, with `agent.num_workers`
+  defaulting to 3 (`--num-workers` overrides it). Local GPU count can cap this.
+  This is separate from completion concurrency; dependent stages stay sequential.
 
 The maximum wait bounds idle routing waits, not CLI execution time. Each worker
 completion has an attempt cap; an optional selector call has its own pinned-call
@@ -149,7 +145,7 @@ unreported provider usage. Token counts are not subscription billing records.
 # Explicit live tests: provider usage is incurred; no automatic model fallback.
 python scripts/verify_llm_profiles.py --live --vision --output .state/model-verification.json
 # Add/retest one model without repeating the entire pool:
-python scripts/verify_llm_profiles.py --live --vision --model claude-code/claude-sonnet-5-5 --output .state/model-verification.json
+python scripts/verify_llm_profiles.py --live --vision --model claude-code/sonnet-5-5 --output .state/model-verification.json
 # Offline tests never authenticate or call providers.
 python -m unittest discover -s tests -v
 ```
@@ -158,6 +154,10 @@ Text/JSON/image probes test access and interface correctness only. They do not
 measure scientific reasoning quality, model ranking, or full-pipeline completion.
 Preserve the sanitized results with the exact CLI versions and test date when
 using the harness in a paper. Repeat after CLI/account/model changes.
+
+## Historical verification and policy changes
+
+The following entries describe previous policies, not the current defaults.
 
 ### Local verification on 2026-09-29
 
