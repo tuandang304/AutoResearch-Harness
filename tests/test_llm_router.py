@@ -138,10 +138,10 @@ class RouterTests(unittest.TestCase):
         expected = {
             "opus": ("claude-code", "claude-opus-5-5", "high"),
             "astra_orchestrator": ("codex", "gpt-6-astra", "high"),
-            "antigravity_opus_orchestrator": ("antigravity", "claude-opus-5.5", "high"),
-            "sonnet": ("claude-code", "sonnet-5-5", "medium"),
+            "antigravity_opus_orchestrator": ("antigravity", "claude-opus-5-5-high", "high"),
+            "sonnet": ("claude-code", "claude-sonnet-5-5", "medium"),
             "sol": ("codex", "gpt-6.1-sol", "medium"),
-            "antigravity_opus": ("antigravity", "claude-opus-5.5", "high"),
+            "antigravity_opus": ("antigravity", "claude-opus-5-5-high", "high"),
         }
         self.assertEqual({name: tuple(profile[key] for key in ("provider", "model", "effort"))
                           for name, profile in policy["profiles"].items()}, expected)
@@ -167,9 +167,9 @@ class RouterTests(unittest.TestCase):
         self.policy["routing"]["max_wait_seconds"] = 0
         self.save_policy()
         for role, model, effort in (
-            ("feedback", "antigravity/claude-opus-5.5", "high"),
+            ("feedback", "antigravity/claude-opus-5-5-high", "high"),
             ("summary", "codex/gpt-6.1-sol", "medium"),
-            ("writing", "claude-code/sonnet-5-5", "medium"),
+            ("writing", "claude-code/claude-sonnet-5-5", "medium"),
         ):
             with self.subTest(role=role):
                 self.complete.reset_mock()
@@ -184,7 +184,7 @@ class RouterTests(unittest.TestCase):
         self.complete.side_effect = [CLIError("quota exhausted"), CLIError("quota exhausted"), ("done", {})]
         self.assertEqual(self.route("orchestrator")[0], "done")
         self.assertEqual(self.models(), ["claude-code/claude-opus-5-5", "codex/gpt-6-astra",
-                                        "antigravity/claude-opus-5.5"])
+                                        "antigravity/claude-opus-5-5-high"])
         self.assertEqual([call.kwargs["effort"] for call in self.complete.call_args_list], ["high"] * 3)
 
     def test_production_selector_dispatches_requested_worker_and_effort(self):
@@ -196,7 +196,7 @@ class RouterTests(unittest.TestCase):
             ("done", {}),
         ]
         self.assertEqual(self.route("code")[0], "done")
-        self.assertEqual(self.models(), ["claude-code/claude-opus-5-5", "antigravity/claude-opus-5.5"])
+        self.assertEqual(self.models(), ["claude-code/claude-opus-5-5", "antigravity/claude-opus-5-5-high"])
         self.assertEqual([call.kwargs["effort"] for call in self.complete.call_args_list], ["high", "high"])
 
     def test_production_antigravity_aliases_share_limits_but_claude_code_is_independent(self):
@@ -205,7 +205,7 @@ class RouterTests(unittest.TestCase):
         self.save_policy()
         self.complete.side_effect = [CLIError("429 model rate limit"), ("done", {})]
         self.assertEqual(self.route("feedback")[0], "done")
-        self.assertEqual(self.models(), ["antigravity/claude-opus-5.5", "claude-code/sonnet-5-5"])
+        self.assertEqual(self.models(), ["antigravity/claude-opus-5-5-high", "claude-code/claude-sonnet-5-5"])
         state = State(self.db)
         for name in ("antigravity_opus", "antigravity_opus_orchestrator"):
             self.assertFalse(state.available(name, self.policy["profiles"][name]["quota_group"]))

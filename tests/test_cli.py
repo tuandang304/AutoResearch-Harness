@@ -63,6 +63,45 @@ class CLITests(unittest.TestCase):
             complete.assert_not_called()
             self.assertEqual(target.read_text(), '{"user_owned": true}')
 
+    def test_verifier_role_coverage_offline_and_live(self):
+        from scripts.verify_llm_profiles import live_state, preflight_state, summarize_roles
+
+        def profile(provider, model, caps=("text", "json", "vision")):
+            return {"provider": provider, "model": model, "effort": "high", "capabilities": list(caps)}
+        policy = {
+            "profiles": {"a": profile("claude-code", "m-a"), "b": profile("antigravity", "m-b"),
+                         "c": profile("codex", "m-c", ("text", "json"))},
+            "roles": {"orchestrator": {"candidates": ["a", "b"], "selection": "fallback"},
+                      "review": {"candidates": ["b"], "selection": "pinned"},
+                      "vision": {"candidates": ["c", "a"], "selection": "sticky_priority"}},
+        }
+        _, state = preflight_state(policy, which=lambda binary: None if binary == "agy" else "/bin/" + binary)
+        roles = summarize_roles(policy, state)
+        self.assertEqual(roles["orchestrator"]["status"], "degraded")
+        self.assertEqual(roles["orchestrator"]["candidates"]["b"], "missing_cli")
+        self.assertEqual(roles["review"]["status"], "unavailable")
+        self.assertEqual(roles["vision"]["candidates"]["c"], "not_capable")
+        self.assertEqual(roles["vision"]["status"], "ok")
+
+        results = [{"model": "claude-code/m-a", "effort": "high", "check": c, "status": "passed"}
+                   for c in ("text", "structured")]
+        results.append({"model": "antigravity/m-b", "effort": "high", "check": "text", "status": "model_unavailable"})
+        roles = summarize_roles(policy, live_state(policy, results))
+        self.assertEqual(roles["orchestrator"]["status"], "degraded")
+        self.assertEqual(roles["review"]["candidates"]["b"], "model_unavailable")
+        self.assertEqual(roles["vision"]["status"], "untested")  # vision probe not run
+
+    def test_verifier_preflight_makes_no_model_calls(self):
+        from scripts import verify_llm_profiles
+
+        policy = str(Path(__file__).resolve().parents[1] / "configs/llm.yaml")
+        with patch.object(sys, "argv", ["verify", "--llm-config", policy]), \
+                patch.object(cli_llm, "complete") as complete, \
+                patch.object(verify_llm_profiles.shutil, "which", return_value="/bin/cli"), \
+                patch("sys.stdout"):
+            self.assertEqual(verify_llm_profiles.main(), 0)
+        complete.assert_not_called()
+
     def test_router_dispatch_and_batch_attribution(self):
         from unittest.mock import Mock
 

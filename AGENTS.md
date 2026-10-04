@@ -20,8 +20,8 @@ Keep ai_scientist imports and AI_SCIENTIST_* compatibility settings intact.
 
 Read docs/llm-routing.md. configs/llm.yaml orders the orchestrator as
 claude-code/claude-opus-5-5 high, then codex/gpt-6-astra high, then
-antigravity/claude-opus-5.5 high. Workers: claude-code/sonnet-5-5 medium,
-codex/gpt-6.1-sol medium, antigravity/claude-opus-5.5 high. Task-specific worker
+antigravity/claude-opus-5-5-high high. Workers: claude-code/claude-sonnet-5-5 medium,
+codex/gpt-6.1-sol medium, antigravity/claude-opus-5-5-high high. Task-specific worker
 pools prefer Sonnet for coding/writing, Sol for extraction/summaries and Antigravity
 Opus for analytical/visual feedback. Write-up and review stay pinned to Claude Code
 Opus. Independent completion batches use routing.max_parallel_subagents; experiment

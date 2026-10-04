@@ -68,9 +68,9 @@ selects projects/regularization. Always select your study for real research.
 ## Models
 
 Orchestrators fall back in order: **claude-code/claude-opus-5-5**, **codex/gpt-6-astra**,
-then **antigravity/claude-opus-5.5**, all at **high effort**. Workers are
-**claude-code/sonnet-5-5** and **codex/gpt-6.1-sol** at **medium effort**, plus
-**antigravity/claude-opus-5.5** at **high effort**. Exact profiles, task instructions
+then **antigravity/claude-opus-5-5-high**, all at **high effort**. Workers are
+**claude-code/claude-sonnet-5-5** and **codex/gpt-6.1-sol** at **medium effort**, plus
+**antigravity/claude-opus-5-5-high** at **high effort**. Exact profiles, task instructions
 and quota groups live in [configs/llm.yaml](configs/llm.yaml).
 
 The orchestrator selects coding/plotting workers by task fit. Sonnet handles scoped

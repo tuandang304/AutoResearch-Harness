@@ -29,7 +29,7 @@ profiles:
       the requested deliverable, not a promise to continue. Do not invent results.
   antigravity_opus_orchestrator:
     provider: antigravity
-    model: claude-opus-5.5
+    model: claude-opus-5-5-high
     effort: high
     quota_group: antigravity-main
     capabilities: *id001
@@ -39,7 +39,7 @@ profiles:
       the requested deliverable, not a promise to continue. Do not invent results.
   sonnet:
     provider: claude-code
-    model: sonnet-5-5
+    model: claude-sonnet-5-5
     effort: medium
     quota_group: claude-main
     capabilities:
@@ -63,7 +63,7 @@ profiles:
     instructions: Implement the supplied plan with reproducible settings and exact output formatting.
   antigravity_opus:
     provider: antigravity
-    model: claude-opus-5.5
+    model: claude-opus-5-5-high
     effort: high
     quota_group: antigravity-main
     capabilities:

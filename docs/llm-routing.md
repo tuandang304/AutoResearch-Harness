@@ -32,10 +32,10 @@ performance at the selected effort or with this completion-only CLI interface.
 |---|---|---|---|
 | opus | claude-code/claude-opus-5-5 | high | Primary orchestration, manuscript decisions, final review |
 | astra_orchestrator | codex/gpt-6-astra | high | Cross-component reasoning and orchestration fallback |
-| antigravity_opus_orchestrator | antigravity/claude-opus-5.5 | high | Research synthesis and final orchestration fallback |
-| sonnet | claude-code/sonnet-5-5 | medium | Scoped coding, iterative fixes and writing |
+| antigravity_opus_orchestrator | antigravity/claude-opus-5-5-high | high | Research synthesis and final orchestration fallback |
+| sonnet | claude-code/claude-sonnet-5-5 | medium | Scoped coding, iterative fixes and writing |
 | sol | codex/gpt-6.1-sol | medium | Reproducible implementation, extraction, summaries and citation assistance |
-| antigravity_opus | antigravity/claude-opus-5.5 | high | Difficult debugging, numerical analysis, visual and evidence review |
+| antigravity_opus | antigravity/claude-opus-5-5-high | high | Difficult debugging, numerical analysis, visual and evidence review |
 
 The 2026-10-04 policy uses the exact IDs and efforts requested by the user. Task
 assignments are engineering hypotheses informed by the earlier
@@ -43,7 +43,8 @@ assignments are engineering hypotheses informed by the earlier
 [OpenAI model selection guidance](https://developers.openai.com/api/docs/guides/model-selection)
 and [Opus prompting guidance](https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/prompting-claude-opus-5-5).
 Those sources do not verify these exact endpoint IDs or compare these effort settings.
-Live access probes on 2026-10-04 found two unavailable IDs (see the results below).
+Live access probes on 2026-10-04 found two unavailable IDs, which were then
+replaced and re-probed successfully (see the results below).
 No quality benchmark was run. Historical probes apply only to their recorded IDs
 and efforts.
 
@@ -143,13 +144,20 @@ unreported provider usage. Token counts are not subscription billing records.
 ## Verification
 
 ```bash
+# Offline preflight: policy schema, CLI binaries on PATH, role coverage. No model calls.
+python scripts/verify_llm_profiles.py [--llm-config projects/<study>/llm.yaml]
 # Explicit live tests: provider usage is incurred; no automatic model fallback.
 python scripts/verify_llm_profiles.py --live --vision --output .state/model-verification.json
 # Add/retest one model without repeating the entire pool:
-python scripts/verify_llm_profiles.py --live --vision --model claude-code/sonnet-5-5 --output .state/model-verification.json
+python scripts/verify_llm_profiles.py --live --vision --model claude-code/claude-sonnet-5-5 --output .state/model-verification.json
 # Offline tests never authenticate or call providers.
 python -m unittest discover -s tests -v
 ```
+
+Live runs print JSON on stdout and a per-model and per-role summary on stderr.
+A role is `ok` when every capable candidate passed, `degraded` when only some did,
+`unavailable` when none did and `untested` when candidates were not probed (for
+example, the vision role without `--vision`). The JSON adds `role_coverage`.
 
 Text/JSON/image probes test access and interface correctness only. They do not
 measure scientific reasoning quality, model ranking, or full-pipeline completion.
@@ -174,7 +182,7 @@ Claude Code Opus initially timed out on the image probe at 120 seconds; a target
 rerun passed all three checks. Claude Code metadata matched its requested model.
 Codex accepted the requests but exposed no serving-model metadata.
 
-The configuration is **not fully live-validated**: Sonnet returned `model_not_found`,
+The configuration was **not fully live-validated** at that point: Sonnet returned `model_not_found`,
 and Antigravity rejected the dotted Opus ID. The user's exact requested IDs remain
 in the policy. `agy models` listed `claude-opus-5-5-high` for high-effort Opus;
 that alternative was not substituted or live-probed. Configuration errors are
@@ -189,6 +197,22 @@ not research quality or full-pipeline completion.
 Ignored local evidence: `.state/model-verification-2026-10-04.json` and
 `.state/live-routing-2026-10-04/`. No credentials or generated research outputs
 are included in this documentation update.
+
+### Model ID update on 2026-10-04
+
+At the user's request the failing IDs were replaced: `sonnet` now uses
+`claude-code/claude-sonnet-5-5` and both Antigravity Opus profiles use
+`antigravity/claude-opus-5-5-high` (the ID listed by `agy models`); efforts are
+unchanged. Targeted live probes (Claude Code 2.1.289, Antigravity CLI 1.2.11):
+
+| Requested model | Effort | Text | JSON | Image | Identity evidence |
+|---|---|---|---|---|---|
+| claude-code/claude-sonnet-5-5 | medium | Pass | Pass | Pass | Metadata matched |
+| antigravity/claude-opus-5-5-high | high | Pass | Pass | Pass | Request accepted only |
+
+With the earlier passes for Opus, Astra and Sol, every configured model/effort
+pair has now passed access probes. This is still interface verification, not a
+quality benchmark. Ignored evidence: `.state/model-verification-ids-*.json`.
 
 ## Historical verification and policy changes
 
