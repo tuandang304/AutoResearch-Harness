@@ -204,3 +204,6 @@ projects/*/runs/
 projects/*/archive/
 projects/*/artifacts/
 .state/
+
+
+material/
