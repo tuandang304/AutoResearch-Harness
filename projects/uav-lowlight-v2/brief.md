@@ -76,3 +76,29 @@ The run uses one worker, so nodes run one at a time.
 .venv/bin/python -m autoresearch --project projects/uav-lowlight-v2 --load_code \
   --exec_backend colab 2>&1 | tee projects/uav-lowlight-v2/runs/launch-$(date +%Y%m%d-%H%M%S).log
 ```
+
+## v2.1 extension: stronger teachers for self-training (pre-registered 2026-10-02)
+
+Written after the v2 results were known, before any v2.1 training. Script:
+`extension_v21.py`, one seed per call, seeds 0–2, same schedule, splits and evaluation.
+
+- **D2 (second round):** D's model pseudo-labels night_train, and D2 trains on the same
+  496 replaced day images with those labels.
+- **D_B (synthetic-trained teacher):** B_full's model is the teacher instead of A.
+- Both use the fixed threshold 0.25. A, D and B_full are retrained as teachers. Training
+  is deterministic at a fixed seed, so A's pseudo-label counts and D's night_test AP must
+  equal the v2 values. A mismatch is reported, not hidden.
+
+Hypotheses (night_test small_all AP, paired with the saved v2 states of the same seed):
+- **H3:** D2 > A.
+- **H4:** D_B > A.
+- Secondary: D2 > D and D_B > D.
+
+The decision rule is the v2 one (seed-pooled clip-bootstrap 95% interval excludes zero
+and all three seeds agree in sign). Day guard: day_test small_all loss ≤ 0.01 against A.
+Budget cap: 24 Colab compute units.
+
+Data check done before this extension: one night_test image (clip 0000112) shows the same
+intersection as night_train clip 0000111 (580 RANSAC-consistent ORB matches; every other
+cross-split pair has ≤ 10). Leaving that clip out changes no v2 comparison at four
+decimals.
