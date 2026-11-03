@@ -330,8 +330,14 @@ def extract_abstract(text):
                 break
 
     if abstract_start is None:
-        # No abstract heading found
-        return ""
+        # load_paper returns plain PyMuPDF text (no markdown headings): take the text
+        # after an "Abstract" line up to the keywords or the first numbered section.
+        match = re.search(
+            r"^\s*abstract\b[:.]?(.*?)(?=^\s*(?:keywords?\b|index terms\b|1\.?\s+\S))",
+            text,
+            re.I | re.M | re.S,
+        )
+        return match[1].strip() if match else ""
 
     # From abstract_start, collect lines until the next heading
     abstract_lines = []

@@ -259,6 +259,14 @@ class ReviewPaperLoadingTests(unittest.TestCase):
         self.assertNotIn("0 0.0082", text)
         self.assertLess(len(first_page), len(text))
 
+    def test_figure_review_finds_abstract_in_plain_text(self):
+        from ai_scientist.perform_vlm_review import extract_abstract
+        plain = "Title\nAbstract:\nWe detect vehicles.\nAt night.\nKeywords: UAV\n1 Introduction\nBody"
+        self.assertEqual(extract_abstract(plain), "We detect vehicles.\nAt night.")
+        self.assertEqual(extract_abstract("Abstract\nShort.\n1 Introduction\nBody"), "Short.")
+        self.assertEqual(extract_abstract("## Abstract\nMarkdown.\n## Intro"), "Markdown.")
+        self.assertEqual(extract_abstract("No such section"), "")
+
 
 class SemanticScholarTests(unittest.TestCase):
     def failing_response(self):
